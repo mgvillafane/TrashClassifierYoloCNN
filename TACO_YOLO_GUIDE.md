@@ -8,6 +8,64 @@ This release prepares 1,126 training images (3,470 objects), 197 validation imag
 (709 objects), and 177 test images (605 objects). The classes represented in these
 splits number 59, 52, and 38 respectively; a 60-class prediction head is still used.
 
+## Run an experiment with one configuration
+
+Edit `DEFAULT_EXPERIMENT` near the top of `taco_yolo.py`, then run the file in your
+IDE or terminal without arguments:
+
+```powershell
+.\.venv\Scripts\python.exe -B taco_yolo.py
+```
+
+This prepares/reuses the dataset, trains, evaluates the best weights on validation,
+and saves prediction comparisons. Defaults are 60 epochs, 640-pixel images, batch 8,
+and automatic CUDA/CPU selection. `patience=20` enables early stopping; set it to 0
+to run every requested epoch. `weights` can point at an existing TACO `best.pt` to
+start a new training schedule from its learned weights.
+
+Each run saves its full configuration in `run_config.json` and output paths in
+`artifacts.json`, alongside `results.png`, weights, validation metrics/plots, and
+prediction comparisons. Repeated experiment names get a suffix automatically; the
+entrypoint uses the actual returned path for evaluation and visualization. Existing
+`prepare`, `train`, `evaluate`, and `predict` CLI commands still work. Training and
+evaluation also accept `--project` to choose where outputs are stored.
+
+## Run and visualize in Databricks
+
+1. Import `taco_databricks.py` as a notebook, and upload `taco_yolo.py` as a regular
+   workspace file beside it. Set `CODE_DIR` in the notebook if the module is elsewhere.
+2. Attach compute with Databricks Runtime ML; select GPU compute for CUDA training.
+3. Upload the complete `data/raw/taco` directory, including `annotations.json` and
+   all image batches, into a writable Unity Catalog volume. The raw data and local
+   model checkpoints are excluded from Git and must be uploaded separately.
+4. Change `TACO_ROOT` in the notebook to your `/Volumes/catalog/schema/volume/trash_yolo`
+   directory and edit `CONFIG`. It exposes dataset/output paths, epochs, resolution,
+   batch size, device, learning rate, training fraction, frozen layers, seed, split
+   ratios, prediction count, and confidence threshold.
+5. Run the cells in order. The installation cell installs Ultralytics while reusing
+   the ML runtime's PyTorch/CUDA installation. Preparation generates Databricks paths;
+   upload raw data rather than reusing a Windows-generated prepared directory.
+6. The final cell displays validation metrics and per-class tables, learning curves,
+   the confusion matrix, precision-recall curves, and ground-truth/prediction images.
+   Rerun just that cell to view the saved results without another training run.
+
+`TACO_HOME` sets the base directory for default data, weight, cache, and result paths
+before importing `taco_yolo`. The notebook sets it to `TACO_ROOT`, so code can live in
+the workspace while data and results stay in the volume. The first training run
+downloads the selected pretrained weights; you can also upload them into
+`TACO_ROOT/data/yolo/weights`.
+
+To reopen an entrypoint experiment in a later notebook session:
+
+```python
+from taco_yolo import display_results
+display_results("/Volumes/catalog/schema/volume/trash_yolo/reports/taco_yolo/databricks_taco",
+                table_display=display)
+```
+
+Databricks supports [source notebooks with cell markers](https://docs.databricks.com/aws/en/notebooks/notebook-export-import)
+and [Python modules beside notebooks](https://docs.databricks.com/aws/en/files/workspace-modules).
+
 ## Run it in PowerShell
 
 The environment is already installed for this project. Select

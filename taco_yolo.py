@@ -1,6 +1,7 @@
 """Train, evaluate, and visualize a YOLO11 detector on the local TACO dataset.
 
 See TACO_YOLO_GUIDE.md for setup, commands, and how to interpret the results.
+Run without arguments to execute DEFAULT_EXPERIMENT, or use the CLI subcommands.
 Raw images and COCO annotations are never edited by this script.
 """
 
@@ -9,23 +10,67 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 import csv
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import random
+import sys
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 ROOT = Path(__file__).resolve().parent
-SOURCE = ROOT / "data/raw/taco"
-PREPARED = ROOT / "data/yolo/taco"
-RUNS = ROOT / "reports/taco_yolo"
+STORAGE = Path(os.environ.get("TACO_HOME", ROOT)).expanduser().resolve()
+SOURCE = STORAGE / "data/raw/taco"
+PREPARED = STORAGE / "data/yolo/taco"
+RUNS = STORAGE / "reports/taco_yolo"
 # Keep package settings and caches inside this project, including on Windows.
-os.environ.setdefault("YOLO_CONFIG_DIR", str(ROOT / "data/yolo/settings"))
-os.environ.setdefault("MPLCONFIGDIR", str(ROOT / "data/yolo/matplotlib"))
+os.environ.setdefault("YOLO_CONFIG_DIR", str(STORAGE / "data/yolo/settings"))
+os.environ.setdefault("MPLCONFIGDIR", str(STORAGE / "data/yolo/matplotlib"))
 os.environ.setdefault("YOLO_AUTOINSTALL", "false")
+
+
+@dataclass
+class ExperimentConfig:
+    source: Path | str = SOURCE
+    prepared: Path | str = PREPARED
+    project: Path | str = RUNS
+    weights: Path | str = "yolo11n.pt"  # Or a TACO-trained best.pt to fine-tune.
+    name: str = "taco"
+    epochs: int = 60
+    imgsz: int = 640
+    batch: int = 8
+    device: str = "auto"  # auto selects the first CUDA GPU, otherwise CPU.
+    patience: int = 20  # 0 disables early stopping.
+    lr: float = 0.001
+    fraction: float = 1.0
+    freeze: int = 0
+    workers: int = 0
+    threads: int = 4
+    seed: int = 42
+    max_side: int = 1280
+    val_ratio: float = 0.15
+    test_ratio: float = 0.15
+    prediction_count: int = 8
+    conf: float = 0.25
+
+
+# Edit this block, then run taco_yolo.py without command-line arguments.
+# Databricks users can edit the equivalent cell in taco_databricks.py.
+DEFAULT_EXPERIMENT = ExperimentConfig(
+    epochs=60,
+    imgsz=640,
+    batch=8,
+    device="auto",
+    patience=20,
+    lr=0.001,
+    weights="yolo11n.pt",
+    name="taco",
+    prediction_count=8,
+    conf=0.25,
+)
 
 
 def write_json(path, value):
@@ -146,14 +191,14 @@ def load_yolo(weights, threads=4):
     except ImportError as exc:
         raise SystemExit("Install the detector dependencies: uv pip install --python .venv/Scripts/python.exe -r requirements-yolo.txt") from exc
     torch.set_num_threads(threads)
-    settings.update({"sync": False, "datasets_dir": str(ROOT / "data/yolo"),
-                     "weights_dir": str(ROOT / "data/yolo/weights"), "runs_dir": str(RUNS)})
+    settings.update({"sync": False, "datasets_dir": str(STORAGE / "data/yolo"),
+                     "weights_dir": str(STORAGE / "data/yolo/weights"), "runs_dir": str(RUNS)})
     return YOLO(str(weights))
 
 
 def resolve_weights(value):
     if value in ("yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt", "yolo11x.pt"):
-        path = ROOT / "data/yolo/weights" / value
+        path = STORAGE / "data/yolo/weights" / value
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
     return Path(value).resolve()
@@ -172,7 +217,7 @@ def train(args):
     model = load_yolo(resolve_weights(args.weights), args.threads)
     model.train(data=str(data), epochs=args.epochs, imgsz=args.imgsz, batch=args.batch,
                 device=args.device, workers=args.workers, seed=args.seed, deterministic=True,
-                project=str(RUNS), name=args.name, exist_ok=False, patience=args.patience,
+                project=str(args.project), name=args.name, exist_ok=False, patience=args.patience,
                 fraction=args.fraction, freeze=args.freeze, optimizer="AdamW", lr0=args.lr,
                 cos_lr=True, close_mosaic=min(10, args.epochs), plots=True, cache=False,
                 amp=args.device != "cpu")
@@ -195,7 +240,7 @@ def evaluate(args):
     model.add_callback("on_val_end", lambda validator: locations.update(output=Path(validator.save_dir)))
     metrics = model.val(data=str(Path(args.data).resolve()), split=args.split, imgsz=args.imgsz,
                         batch=args.batch, device=args.device, workers=0, conf=0.001,
-                        project=str(RUNS), name=args.name, plots=True)
+                        project=str(args.project), name=args.name, plots=True)
     output = locations["output"]
     report = {"split": args.split, "weights": str(Path(args.weights).resolve()),
               "averaging": "Mean over classes with ground-truth objects in this split; precision/recall use the mean-F1 operating point.",
@@ -224,6 +269,7 @@ def evaluate(args):
         writer.writerows(report["per_class"])
     print(json.dumps({k: v for k, v in report.items() if k != "per_class"}, indent=2), flush=True)
     print(f"Evaluation artifacts: {output}", flush=True)
+    return output
 
 
 def intersection_over_union(a, b):
@@ -334,7 +380,79 @@ def predict(args):
         print(f"Saved {output / (stem + '.jpg')}", flush=True)
 
 
-def main():
+def run_experiment(config=None):
+    """Prepare, train, validate, and save example predictions from one configuration."""
+    config = config if config is not None else DEFAULT_EXPERIMENT
+    if config.epochs < 1 or config.batch < 1 or config.imgsz < 32:
+        raise ValueError("epochs/batch must be positive and imgsz must be at least 32")
+    if not 0 < config.fraction <= 1 or not 0 <= config.conf <= 1 or config.prediction_count < 1:
+        raise ValueError("fraction must be in (0, 1], conf in [0, 1], and prediction_count positive")
+    if config.patience < 0 or config.lr <= 0 or config.threads < 1 or config.workers < 0:
+        raise ValueError("patience/workers must be nonnegative; lr/threads must be positive")
+    source = Path(config.source).expanduser().resolve()
+    if not (source / "annotations.json").is_file():
+        raise FileNotFoundError(f"Missing {source / 'annotations.json'}. Set source to the raw TACO folder, including its image batches.")
+
+    device = str(config.device)
+    if device == "auto":
+        import torch
+        device = "0" if torch.cuda.is_available() else "cpu"
+    print(f"Training device: {device}; requested epochs: {config.epochs}", flush=True)
+    prepared = Path(config.prepared).expanduser().resolve()
+    data = prepare(source, prepared, config.seed, config.max_side, config.val_ratio, config.test_ratio)
+    arguments = asdict(config)
+    arguments.update(source=source, prepared=prepared, data=data, device=device,
+                     project=Path(config.project).expanduser().resolve())
+    best = Path(train(argparse.Namespace(**arguments)))
+    run_dir = best.parent.parent
+    # Follow the trainer's actual directory, including any automatically added suffix.
+    write_json(run_dir / "run_config.json", {key: str(value) if isinstance(value, Path) else value
+                                           for key, value in arguments.items()})
+    evaluation_dir = evaluate(argparse.Namespace(
+        data=data, weights=best, imgsz=config.imgsz, batch=config.batch,
+        device=device, threads=config.threads, split="val", project=run_dir, name="validation"))
+    predictions_dir = run_dir / "predictions"
+    predict(argparse.Namespace(
+        data=data, weights=best, imgsz=config.imgsz, device=device, threads=config.threads,
+        split="val", image_id=None, source=None, count=config.prediction_count,
+        conf=config.conf, output=predictions_dir))
+    artifacts = {"run_dir": str(run_dir), "best_weights": str(best), "data": str(data),
+                 "evaluation_dir": str(evaluation_dir), "predictions_dir": str(predictions_dir)}
+    write_json(run_dir / "artifacts.json", artifacts)
+    print(f"Experiment complete. Results: {run_dir}", flush=True)
+    return artifacts
+
+
+def display_results(run_dir, table_display=None):
+    """Display saved metrics and plots in Databricks/Jupyter without retraining."""
+    import pandas as pd
+    from IPython.display import Image as NotebookImage, display
+
+    run_dir = Path(run_dir)
+    artifacts = json.loads((run_dir / "artifacts.json").read_text(encoding="utf-8"))
+    evaluation_dir = Path(artifacts["evaluation_dir"])
+    predictions_dir = Path(artifacts["predictions_dir"])
+    report = json.loads((evaluation_dir / "metrics.json").read_text(encoding="utf-8"))
+    show_table = table_display if table_display is not None else display
+    print("Validation metrics (0 to 1; higher is better)")
+    show_table(pd.DataFrame([{key: report[key] for key in ("precision", "recall", "mAP50", "mAP50_95")}]))
+    print("Per-class validation metrics; blank values indicate no evaluation support")
+    show_table(pd.read_csv(evaluation_dir / "per_class.csv"))
+    plots = [run_dir / "results.png", evaluation_dir / "confusion_matrix_normalized.png",
+             *sorted(evaluation_dir.glob("*PR_curve.png"))]
+    for path in plots:
+        if path.is_file():
+            print(path.name)
+            display(NotebookImage(filename=str(path)))
+    print("Ground truth (left) and predictions (right)")
+    for path in sorted(predictions_dir.glob("*.jpg")):
+        display(NotebookImage(filename=str(path)))
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        return run_experiment(DEFAULT_EXPERIMENT)
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     prep = commands.add_parser("prepare", help="Convert COCO boxes, orient copies, and split by batch")
@@ -352,6 +470,7 @@ def main():
         sub.add_argument("--device", default="cpu", help="cpu, or 0 for the first CUDA GPU")
         sub.add_argument("--threads", type=int, default=4)
         if name == "train":
+            sub.add_argument("--project", type=Path, default=RUNS)
             sub.add_argument("--epochs", type=int, default=60)
             sub.add_argument("--batch", type=int, default=8)
             sub.add_argument("--workers", type=int, default=0)
@@ -362,6 +481,7 @@ def main():
             sub.add_argument("--lr", type=float, default=0.001)
             sub.add_argument("--name", default="taco")
         elif name == "evaluate":
+            sub.add_argument("--project", type=Path, default=RUNS)
             sub.add_argument("--split", choices=("val", "test"), default="val")
             sub.add_argument("--batch", type=int, default=8)
             sub.add_argument("--name", default="evaluation")
@@ -372,7 +492,7 @@ def main():
             sub.add_argument("--count", type=int, default=4)
             sub.add_argument("--conf", type=float, default=0.25)
             sub.add_argument("--output", type=Path, default=RUNS / "predictions")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.command == "prepare":
         prepare(args.source, args.output, args.seed, args.max_side, args.val_ratio, args.test_ratio)
     elif args.command == "train":

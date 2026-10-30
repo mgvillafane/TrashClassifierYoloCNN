@@ -3,3 +3,8 @@ ultralytics==8.4.193
 # The newer Windows PyTorch build was blocked by Application Control on this PC.
 torch==2.9.1
 torchvision==0.24.1
+# Windows Application Control also blocks the newer pandas DLLs on this PC.
+pandas==3.0.5; sys_platform == "win32"
+pandas>=2.1; sys_platform != "win32"
+# Inline notebook visualization.
+ipython>=8

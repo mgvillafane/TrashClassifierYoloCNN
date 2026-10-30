@@ -2,7 +2,9 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -71,6 +73,92 @@ class TacoYoloTests(unittest.TestCase):
         detector.check_class_names({0: 'Drink can'}, manifest)
         with self.assertRaisesRegex(ValueError, 'TACO-trained'):
             detector.check_class_names({0: 'person'}, manifest)
+
+    def test_running_without_arguments_uses_editable_experiment(self):
+        with patch.object(detector, 'run_experiment', return_value={'run_dir': 'saved'}) as run:
+            self.assertEqual(detector.main([]), {'run_dir': 'saved'})
+        run.assert_called_once_with(detector.DEFAULT_EXPERIMENT)
+
+    def test_training_cli_still_accepts_explicit_parameters(self):
+        with patch.object(detector, 'train') as train:
+            detector.main(['train', '--epochs', '7', '--project', 'custom_runs', '--name', 'custom'])
+        args = train.call_args.args[0]
+        self.assertEqual((args.epochs, args.project, args.name), (7, Path('custom_runs'), 'custom'))
+
+    def test_experiment_uses_actual_run_directory_and_best_weights_in_every_stage(self):
+        for cuda_available, expected_device in ((False, 'cpu'), (True, '0')):
+            with self.subTest(cuda=cuda_available), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / 'raw'
+                source.mkdir()
+                (source / 'annotations.json').write_text('{}')
+                config = detector.ExperimentConfig(
+                    source=source, prepared=root / 'prepared', project=root / 'runs',
+                    name='experiment', epochs=3, imgsz=320, batch=4, lr=.002,
+                    prediction_count=2, conf=.4)
+                # The trainer has added a suffix that differs from config.name.
+                run_dir = root / 'runs/experiment-2'
+                best = run_dir / 'weights/best.pt'
+                data = root / 'prepared/dataset.yaml'
+                evaluation = run_dir / 'validation-2'
+                torch_stub = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: cuda_available))
+                with patch.dict('sys.modules', {'torch': torch_stub}), \
+                        patch.object(detector, 'prepare', return_value=data), \
+                        patch.object(detector, 'train', return_value=best) as train, \
+                        patch.object(detector, 'evaluate', return_value=evaluation) as evaluate, \
+                        patch.object(detector, 'predict') as predict:
+                    artifacts = detector.run_experiment(config)
+                training_args = train.call_args.args[0]
+                evaluation_args = evaluate.call_args.args[0]
+                prediction_args = predict.call_args.args[0]
+                self.assertEqual((training_args.epochs, training_args.imgsz, training_args.lr), (3, 320, .002))
+                self.assertEqual(evaluation_args.project, run_dir)
+                self.assertEqual(prediction_args.output, run_dir / 'predictions')
+                self.assertEqual((prediction_args.count, prediction_args.conf), (2, .4))
+                for args in (training_args, evaluation_args, prediction_args):
+                    self.assertEqual(args.device, expected_device)
+                    self.assertEqual(args.data, data)
+                for args in (evaluation_args, prediction_args):
+                    self.assertEqual(args.weights, best)
+                    self.assertEqual(args.split, 'val')
+                self.assertEqual(artifacts['evaluation_dir'], str(evaluation))
+                self.assertEqual(json.loads((run_dir / 'artifacts.json').read_text()), artifacts)
+                saved = json.loads((run_dir / 'run_config.json').read_text())
+                self.assertEqual((saved['device'], saved['source']), (expected_device, str(source)))
+
+    def test_invalid_experiment_parameters_fail_before_preparing_or_training(self):
+        with patch.object(detector, 'prepare') as prepare, patch.object(detector, 'train') as train:
+            for config in (detector.ExperimentConfig(epochs=0), detector.ExperimentConfig(conf=1.1),
+                           detector.ExperimentConfig(fraction=0), detector.ExperimentConfig(patience=-1)):
+                with self.subTest(config=config), self.assertRaises(ValueError):
+                    detector.run_experiment(config)
+            prepare.assert_not_called()
+            train.assert_not_called()
+
+    def test_display_results_reads_saved_artifacts_without_training(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evaluation, predictions = root / 'validation', root / 'predictions'
+            detector.write_json(root / 'artifacts.json', {
+                'evaluation_dir': str(evaluation), 'predictions_dir': str(predictions)})
+            detector.write_json(evaluation / 'metrics.json', {
+                'precision': .5, 'recall': .25, 'mAP50': .3, 'mAP50_95': .2})
+            (evaluation / 'per_class.csv').write_text('class,objects,AP50\nBottle,2,0.3\n')
+            predictions.mkdir()
+            for path in (root / 'results.png', evaluation / 'confusion_matrix_normalized.png',
+                         evaluation / 'BoxPR_curve.png', predictions / 'image_000001.jpg'):
+                Image.new('RGB', (10, 10)).save(path)
+            # Mock the notebook renderer while parsing the real saved metric tables.
+            displayed, tables = [], []
+            with patch.dict('sys.modules', {'IPython.display': SimpleNamespace(
+                    Image=lambda filename: filename, display=lambda value: displayed.append(value))}), \
+                    patch.object(detector, 'train') as train:
+                detector.display_results(root, table_display=tables.append)
+            train.assert_not_called()
+            self.assertEqual(tables[0].iloc[0]['recall'], .25)
+            self.assertEqual(tables[1].iloc[0]['class'], 'Bottle')
+            self.assertEqual(len(displayed), 4)
+            self.assertIn(str(predictions / 'image_000001.jpg'), displayed)
 
 
 if __name__ == '__main__':
