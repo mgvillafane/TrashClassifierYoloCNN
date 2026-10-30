@@ -1,0 +1,5 @@
+# Separate environment for TACO object detection.
+ultralytics==8.4.193
+# The newer Windows PyTorch build was blocked by Application Control on this PC.
+torch==2.9.1
+torchvision==0.24.1
