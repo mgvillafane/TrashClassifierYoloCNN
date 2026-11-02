@@ -6,12 +6,27 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import pandas as pd
 from PIL import Image
 
 import taco_yolo as detector
 
 
 class TacoYoloTests(unittest.TestCase):
+    def make_raw_dataset(self, root):
+        source = root / 'raw'
+        images, annotations = [], []
+        for i in range(3):
+            path = source / f'batch_{i}/sample.jpg'
+            path.parent.mkdir(parents=True)
+            Image.new('RGB', (80, 40), 'red').save(path)
+            images.append({'id': i, 'file_name': f'batch_{i}/sample.jpg', 'width': 80, 'height': 40})
+            annotations.append({'id': i, 'image_id': i, 'category_id': 37, 'bbox': [10, 10, 20, 20]})
+        (source / 'annotations.json').write_text(json.dumps({
+            'images': images, 'annotations': annotations,
+            'categories': [{'id': 37, 'name': 'Bottle'}]}))
+        return source
+
     def test_box_conversion_and_boundary_clipping(self):
         self.assertEqual(detector.normalized_box([20, 10, 40, 20], 100, 50), (0.4, 0.4, 0.4, 0.4))
         self.assertEqual(detector.normalized_box([-10, 0, 30, 50], 100, 50), (0.1, 0.5, 0.2, 1.0))
@@ -68,6 +83,68 @@ class TacoYoloTests(unittest.TestCase):
         self.assertEqual(counts['false_negatives'], 0)
         self.assertEqual(detector.intersection_over_union([0, 0, 0, 0], [0, 0, 0, 0]), 0)
 
+    def test_moved_prepared_data_is_reused_and_yaml_points_at_new_location(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, output = self.make_raw_dataset(root), root / 'prepared'
+            detector.prepare(source, output)
+            manifest = json.loads((output / 'split_manifest.json').read_text())
+            # A legacy Windows manifest must also be reusable on Linux.
+            manifest['configuration']['source'] = r'C:\old-computer\data\raw\taco'
+            detector.write_json(output / 'split_manifest.json', manifest)
+            originals = {row[key]: (output / row[key]).read_bytes()
+                         for row in manifest['images'] for key in ('image', 'label')}
+            moved_source, moved_output = root / 'uploaded_raw', root / 'uploaded_prepared'
+            source.rename(moved_source)
+            output.rename(moved_output)
+            with patch.object(detector.Image, 'open', side_effect=AssertionError('Unexpected image regeneration')):
+                data = detector.prepare(moved_source, moved_output)
+            self.assertEqual(data, moved_output / 'dataset.yaml')
+            yaml = data.read_text()
+            self.assertEqual(yaml.splitlines()[0], f'path: {json.dumps(moved_output.resolve().as_posix())}')
+            self.assertIn('  0: "Bottle"', yaml)
+            for relative, contents in originals.items():
+                self.assertEqual((moved_output / relative).read_bytes(), contents)
+            self.assertEqual(json.loads((moved_output / 'split_manifest.json').read_text()), manifest)
+
+    def test_reuse_restores_missing_dataset_yaml_without_reprocessing_images(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, output = self.make_raw_dataset(root), root / 'prepared'
+            data = detector.prepare(source, output)
+            data.unlink()
+            with patch.object(detector.Image, 'open', side_effect=AssertionError('Unexpected image regeneration')):
+                self.assertEqual(detector.prepare(source, output), data)
+            self.assertTrue(data.is_file())
+
+    def test_reuse_still_rejects_changed_settings_and_annotations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, output = self.make_raw_dataset(root), root / 'prepared'
+            detector.prepare(source, output)
+            for key, value in (('seed', 99), ('max_side', 640), ('val_ratio', .2), ('test_ratio', .2)):
+                with self.subTest(setting=key), self.assertRaisesRegex(ValueError, f'{key}: saved='):
+                    detector.prepare(source, output, **{key: value})
+            coco = json.loads((source / 'annotations.json').read_text())
+            coco['categories'][0]['name'] = 'Changed class'
+            (source / 'annotations.json').write_text(json.dumps(coco))
+            with self.assertRaisesRegex(ValueError, 'annotation_sha256: saved='):
+                detector.prepare(source, output)
+
+    def test_missing_prepared_label_is_detected_and_rebuilt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, output = self.make_raw_dataset(root), root / 'prepared'
+            detector.prepare(source, output)
+            manifest = json.loads((output / 'split_manifest.json').read_text())
+            label = output / manifest['images'][0]['label']
+            original = label.read_bytes()
+            label.unlink()
+            self.assertFalse(detector.prepared_files_exist(output, manifest['images']))
+            detector.prepare(source, output)
+            self.assertEqual(label.read_bytes(), original)
+            self.assertTrue(detector.prepared_files_exist(output, manifest['images']))
+
     def test_pretrained_coco_classes_cannot_be_scored_as_taco_classes(self):
         manifest = {'class_names': {'0': 'Drink can'}}
         detector.check_class_names({0: 'Drink can'}, manifest)
@@ -106,8 +183,10 @@ class TacoYoloTests(unittest.TestCase):
                         patch.object(detector, 'prepare', return_value=data), \
                         patch.object(detector, 'train', return_value=best) as train, \
                         patch.object(detector, 'evaluate', return_value=evaluation) as evaluate, \
-                        patch.object(detector, 'predict') as predict:
+                        patch.object(detector, 'predict') as predict, \
+                        patch.object(detector, 'prepare_tensorboard_logs', return_value=run_dir) as tensorboard:
                     artifacts = detector.run_experiment(config)
+                tensorboard.assert_called_once_with(run_dir)
                 training_args = train.call_args.args[0]
                 evaluation_args = evaluate.call_args.args[0]
                 prediction_args = predict.call_args.args[0]
@@ -155,10 +234,55 @@ class TacoYoloTests(unittest.TestCase):
                     patch.object(detector, 'train') as train:
                 detector.display_results(root, table_display=tables.append)
             train.assert_not_called()
+            self.assertIsInstance(tables[0], pd.DataFrame)
             self.assertEqual(tables[0].iloc[0]['recall'], .25)
             self.assertEqual(tables[1].iloc[0]['class'], 'Bottle')
             self.assertEqual(len(displayed), 4)
             self.assertIn(str(predictions / 'image_000001.jpg'), displayed)
+
+    def test_tensorboard_backfills_csv_and_images_without_retraining_or_duplicate_files(self):
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'results.csv').write_text(
+                ' epoch ,train/box_loss,metrics/mAP50(B),note,invalid\n'
+                '1,1.5,0.1,first,nan\n2,0.9,0.2,second,inf\n')
+            Image.new('RGB', (20, 10), 'red').save(root / 'train_batch0.jpg')
+            (root / 'predictions').mkdir()
+            Image.new('RGB', (20, 10), 'blue').save(root / 'predictions/image_000001.jpg')
+            with patch.object(detector, 'train') as train:
+                self.assertEqual(detector.prepare_tensorboard_logs(root), root)
+                event_path = root / 'events.out.tfevents.taco'
+                original = event_path.read_bytes()
+                detector.prepare_tensorboard_logs(root)
+                self.assertEqual(event_path.read_bytes(), original)
+            train.assert_not_called()
+            self.assertEqual(len(list(root.glob('events.out.tfevents.*'))), 1)
+            events = EventAccumulator(str(root)).Reload()
+            losses = events.Scalars('train/box_loss')
+            self.assertEqual([event.step for event in losses], [1, 2])
+            self.assertAlmostEqual(losses[-1].value, .9)
+            self.assertNotIn('invalid', events.Tags()['scalars'])
+            self.assertEqual(set(events.Tags()['images']), {'data/train_batch0', 'data/image_000001'})
+
+    def test_tensorboard_preserves_native_metrics_without_backfilling_duplicates(self):
+        from torch.utils.tensorboard import SummaryWriter
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with SummaryWriter(str(root)) as writer:
+                writer.add_scalar('train/box_loss', 1.5, 1)
+            (root / 'results.csv').write_text('epoch,train/box_loss\n1,999\n')
+            detector.prepare_tensorboard_logs(root)
+            events = EventAccumulator(str(root)).Reload()
+            self.assertEqual([event.value for event in events.Scalars('train/box_loss')], [1.5])
+
+    def test_tensorboard_requires_training_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(FileNotFoundError, 'No TensorBoard events or results.csv'):
+                detector.prepare_tensorboard_logs(directory)
 
 
 if __name__ == '__main__':

@@ -17,7 +17,9 @@ import math
 import os
 from pathlib import Path
 import random
+import shutil
 import sys
+import tempfile
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
@@ -108,6 +110,36 @@ def split_by_batch(images, seed=42, val_ratio=0.15, test_ratio=0.15):
     return {image["id"]: group_splits[Path(image["file_name"]).parts[0]] for image in images}
 
 
+def write_dataset_yaml(output, names):
+    """Point YOLO at the current prepared location, including after a move."""
+    output = Path(output)
+    path = output / "dataset.yaml"
+    yaml = f"path: {json.dumps(output.as_posix())}\ntrain: images/train\nval: images/val\ntest: images/test\nnames:\n"
+    yaml += "".join(f"  {int(key)}: {json.dumps(name)}\n"
+                    for key, name in sorted(names.items(), key=lambda item: int(item[0])))
+    if not path.is_file() or path.read_text(encoding="utf-8") != yaml:
+        path.write_text(yaml, encoding="utf-8")
+    return path
+
+
+def prepared_files_exist(output, records):
+    """Check each split with one listing instead of a remote stat per file."""
+    expected = defaultdict(set)
+    for record in records:
+        for key in ("image", "label"):
+            path = Path(record[key])
+            expected[path.parent].add(path.name)
+    for directory, names in expected.items():
+        try:
+            with os.scandir(output / directory) as entries:
+                existing = {entry.name for entry in entries if entry.is_file()}
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        if not names.issubset(existing):
+            return False
+    return True
+
+
 def prepare(source=SOURCE, output=PREPARED, seed=42, max_side=1280, val_ratio=0.15, test_ratio=0.15):
     source, output = Path(source).resolve(), Path(output).resolve()
     annotation_path = source / "annotations.json"
@@ -119,11 +151,22 @@ def prepare(source=SOURCE, output=PREPARED, seed=42, max_side=1280, val_ratio=0.
     manifest_path = output / "split_manifest.json"
     if manifest_path.exists():
         previous = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if previous["configuration"] != configuration:
-            raise ValueError("Prepared data uses different settings. Choose another --output directory.")
-        if all((output / r["image"]).is_file() and (output / r["label"]).is_file() for r in previous["images"]):
-            print(f"Reusing prepared data: {output / 'dataset.yaml'}", flush=True)
-            return output / "dataset.yaml"
+        # The absolute source location is metadata: moving identical data between
+        # Windows and Databricks does not change the split or generated labels.
+        saved_settings = {key: value for key, value in previous["configuration"].items() if key != "source"}
+        requested_settings = {key: value for key, value in configuration.items() if key != "source"}
+        if saved_settings != requested_settings:
+            changes = "; ".join(
+                f"{key}: saved={saved_settings.get(key)!r}, requested={requested_settings.get(key)!r}"
+                for key in sorted(saved_settings.keys() | requested_settings.keys())
+                if saved_settings.get(key) != requested_settings.get(key))
+            raise ValueError(
+                f"Prepared data uses different settings in {manifest_path}: {changes}. "
+                "Choose another --output directory (or CONFIG.prepared).")
+        if prepared_files_exist(output, previous["images"]):
+            data = write_dataset_yaml(output, previous["class_names"])
+            print(f"Reusing prepared data: {data}", flush=True)
+            return data
     if max_side < 32:
         raise ValueError("max_side must be at least 32")
     categories = sorted(coco["categories"], key=lambda c: c["id"])
@@ -172,16 +215,14 @@ def prepare(source=SOURCE, output=PREPARED, seed=42, max_side=1280, val_ratio=0.
         if (index + 1) % 100 == 0:
             print(f"Prepared {index + 1}/{len(coco['images'])} images", flush=True)
     names = {i: category["name"] for i, category in enumerate(categories)}
-    yaml = f"path: {json.dumps(output.as_posix())}\ntrain: images/train\nval: images/val\ntest: images/test\nnames:\n"
-    yaml += "".join(f"  {i}: {json.dumps(name)}\n" for i, name in names.items())
-    (output / "dataset.yaml").write_text(yaml, encoding="utf-8")
+    data = write_dataset_yaml(output, names)
     split_counts = Counter(row["split"] for row in records)
     class_counts = {split: Counter(cls for row in records if row["split"] == split for cls in row["class_ids"])
                     for split in ("train", "val", "test")}
     write_json(manifest_path, {"configuration": configuration, "class_names": names, "image_counts": dict(split_counts),
                                "class_counts": class_counts, "issues": issues, "images": records})
     print(f"Prepared {dict(split_counts)}; {len(issues)} annotation notes. {output / 'dataset.yaml'}", flush=True)
-    return output / "dataset.yaml"
+    return data
 
 
 def load_yolo(weights, threads=4):
@@ -191,7 +232,8 @@ def load_yolo(weights, threads=4):
     except ImportError as exc:
         raise SystemExit("Install the detector dependencies: uv pip install --python .venv/Scripts/python.exe -r requirements-yolo.txt") from exc
     torch.set_num_threads(threads)
-    settings.update({"sync": False, "datasets_dir": str(STORAGE / "data/yolo"),
+    settings.update({"sync": False, "mlflow": False, "tensorboard": True,
+                     "datasets_dir": str(STORAGE / "data/yolo"),
                      "weights_dir": str(STORAGE / "data/yolo/weights"), "runs_dir": str(RUNS)})
     return YOLO(str(weights))
 
@@ -416,11 +458,65 @@ def run_experiment(config=None):
         data=data, weights=best, imgsz=config.imgsz, device=device, threads=config.threads,
         split="val", image_id=None, source=None, count=config.prediction_count,
         conf=config.conf, output=predictions_dir))
+    tensorboard_dir = prepare_tensorboard_logs(run_dir)
     artifacts = {"run_dir": str(run_dir), "best_weights": str(best), "data": str(data),
-                 "evaluation_dir": str(evaluation_dir), "predictions_dir": str(predictions_dir)}
+                 "evaluation_dir": str(evaluation_dir), "predictions_dir": str(predictions_dir),
+                 "tensorboard_dir": str(tensorboard_dir)}
     write_json(run_dir / "artifacts.json", artifacts)
     print(f"Experiment complete. Results: {run_dir}", flush=True)
     return artifacts
+
+
+def prepare_tensorboard_logs(run_dir):
+    """Add data images and backfill older CSV-only runs without retraining."""
+    run_dir = Path(run_dir).expanduser().resolve()
+    event_path = run_dir / "events.out.tfevents.taco"
+    if event_path.is_file():
+        return run_dir
+    native_events = any(run_dir.glob("events.out.tfevents.*"))
+    csv_path = run_dir / "results.csv"
+    if not native_events and not csv_path.is_file():
+        raise FileNotFoundError(f"No TensorBoard events or results.csv in {run_dir}")
+
+    import numpy as np
+    from torch.utils.tensorboard import SummaryWriter
+
+    # Close the writer before copying: volume files do not support append/seek.
+    with tempfile.TemporaryDirectory(prefix="taco_tensorboard_") as temporary:
+        with SummaryWriter(temporary) as writer:
+            if not native_events:
+                with csv_path.open(encoding="utf-8-sig", newline="") as stream:
+                    for row in csv.DictReader(stream):
+                        row = {key.strip(): value for key, value in row.items() if key is not None}
+                        step = int(float(row.pop("epoch")))
+                        for tag, value in row.items():
+                            try:
+                                value = float(value)
+                            except (TypeError, ValueError):
+                                continue
+                            if math.isfinite(value):
+                                writer.add_scalar(tag, value, step)
+            images = [run_dir / "labels.jpg", *sorted(run_dir.glob("train_batch*.jpg"))[:3],
+                      *sorted((run_dir / "predictions").glob("*.jpg"))[:4]]
+            for path in images:
+                if path.is_file():
+                    with Image.open(path) as image:
+                        rgb = image.convert("RGB")
+                        rgb.thumbnail((1280, 1280))
+                        writer.add_image(f"data/{path.stem}", np.asarray(rgb), 0, dataformats="HWC")
+        event_file = next(Path(temporary).glob("events.out.tfevents.*"))
+        shutil.copyfile(event_file, event_path)
+    print(f"TensorBoard logs: {run_dir}", flush=True)
+    return run_dir
+
+
+def display_tensorboard(run_dir):
+    """Open TensorBoard inline in an active Databricks or Jupyter notebook."""
+    from shlex import quote
+    from tensorboard import notebook
+
+    log_dir = prepare_tensorboard_logs(run_dir)
+    return notebook.start(f"--logdir {quote(str(log_dir))} --port 6006 --load_fast=false")
 
 
 def display_results(run_dir, table_display=None):

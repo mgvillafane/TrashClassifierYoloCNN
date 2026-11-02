@@ -8,3 +8,7 @@ pandas==3.0.5; sys_platform == "win32"
 pandas>=2.1; sys_platform != "win32"
 # Inline notebook visualization.
 ipython>=8
+ipykernel>=6
+Pillow>=10
+matplotlib>=3.8
+tensorboard==2.21.0

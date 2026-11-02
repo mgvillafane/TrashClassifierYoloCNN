@@ -1,297 +1,162 @@
 # TACO object detection with YOLO11
 
-The implementation is in `taco_yolo.py`. It uses Ultralytics' YOLO11 Nano, transfers
-pretrained visual features, and learns a detection head for TACO's 60 classes.
-The default `train` command uses every training image; it does not train from scratch.
+This project trains a YOLO11 Nano detector on TACO's 60 classes. It supports
+local training and the uploaded dataset in Databricks. Raw images and source
+annotations remain unchanged.
 
-This release prepares 1,126 training images (3,470 objects), 197 validation images
-(709 objects), and 177 test images (605 objects). The classes represented in these
-splits number 59, 52, and 38 respectively; a 60-class prediction head is still used.
+## Project files
 
-## Run an experiment with one configuration
+- `taco_yolo.py`: prepare, train, validate, predict, and visualize results.
+- `taco_databricks.py`: the Databricks GPU experiment and TensorBoard viewer.
+- `databricks.yml`: the `taco_small_gpu` job on one serverless A10 GPU.
+- `requirements-yolo.txt`: dependencies for local training and visualization.
+- `tests/test_taco_yolo.py`: dataset, experiment, and TensorBoard checks.
 
-Edit `DEFAULT_EXPERIMENT` near the top of `taco_yolo.py`, then run the file in your
-IDE or terminal without arguments:
+The dataset stays in `data/`; saved local experiments stay in `reports/`.
+Databricks connection settings and bundle state stay in `.databricks/`.
+
+## Run on Databricks
+
+The uploaded volume is `/Volumes/workspace/default/tacotrashdata`:
+
+```text
+taco/annotations.json         Raw COCO annotations
+taco/batch_*/                Raw images
+yolo/taco/images/            Prepared images
+yolo/taco/labels/            YOLO labels
+yolo/taco/dataset.yaml       Dataset configuration
+yolo/weights/yolo11n.pt      Pretrained weights
+reports/taco_yolo/           Saved experiments
+```
+
+In VS Code, press **Ctrl+Shift+P**, choose **Databricks: Deploy the bundle
+and run a resource**, and select **taco_small_gpu**. You can also select the job
+in the Databricks **Bundle Resource Explorer** and click its play button.
+The editor's **Run File as Workflow** action uses selected compute and does
+not apply the bundle job's A10 GPU settings.
+
+With the Databricks CLI on PATH:
+
+```powershell
+databricks bundle validate -t dev
+databricks bundle deploy -t dev
+databricks bundle run taco_small_gpu -t dev
+```
+
+Edit `CONFIG` in `taco_databricks.py` to change the experiment. Its small default
+uses 2 epochs, 320-pixel images, batch 16, 10% of the training split, and two
+prediction examples. `device="0"` requires a GPU. Increase `fraction` to 1.0
+and increase `epochs` for a full experiment.
+
+The notebook uses the headless Ultralytics package for compatibility with the
+server environment. It stages outputs in a writable temporary directory because
+the trainer appends to CSV files. It then copies the completed experiment into
+one folder in the volume and updates the artifact paths.
+
+## TensorBoard
+
+New training runs enable Ultralytics' TensorBoard callback automatically.
+Event files are kept inside the same experiment folder as the checkpoints and
+CSV. The callback logs losses, learning rates, validation precision/recall, mAP,
+and the model graph. A summary event file adds training-batch images, class
+distribution plots, and saved prediction comparisons.
+
+### View in Databricks
+
+Open `taco_databricks.py` as a notebook and run its final **TensorBoard viewer**
+cell in an active notebook session. Edit `RUN_TO_VIEW` to select a saved run.
+The viewer can use CPU compute; it does not train or require CUDA.
+Install the notebook's dependencies first if the session is fresh.
+
+The training job exits before the viewer cell. This preserves its event files
+without starting a short-lived dashboard in a completed job. An interactive
+TensorBoard UI needs an active notebook session.
+
+- **Scalars / Time Series**: inspect losses, learning rates, precision, recall,
+  and mAP by epoch.
+- **Images**: inspect training batches, class distributions, and prediction
+  comparisons.
+- **Graphs**: inspect the model graph recorded by new training runs.
+
+Older runs with only `results.csv` are converted when the viewer is opened.
+The conversion does not retrain, and repeated views reuse the same summary
+event file. Historical CSV runs have no recorded model graph.
+
+For multiple runs in one notebook, prepare any older run directories first,
+then start TensorBoard on the parent directory:
+
+```python
+from tensorboard import notebook
+notebook.start("--logdir /Volumes/workspace/default/tacotrashdata/reports/taco_yolo --load_fast=false")
+```
+
+### View locally
+
+Install dependencies in the project's existing virtual environment:
+
+```powershell
+uv pip install --python .venv/Scripts/python.exe -r requirements-yolo.txt
+```
+
+New local experiments generate their event files automatically. To convert an
+older saved run, for example:
+
+```powershell
+.\.venv\Scripts\python.exe -B -c "from taco_yolo import prepare_tensorboard_logs; prepare_tensorboard_logs('reports/taco_yolo/demo-2')"
+.\.venv\Scripts\python.exe -B -m tensorboard.main --logdir reports/taco_yolo --port 6006 --load_fast=false
+```
+
+Open `http://localhost:6006`. Databricks volume paths are remote; download
+their event files into a local report directory to visualize them locally.
+
+## Data preparation
+
+`prepare()` reads COCO annotations, keeps each source batch in a single split,
+applies EXIF rotation to image copies, resizes them, and creates normalized YOLO
+labels. The split contains 1,126 training, 197 validation, and 177 test images.
+
+Existing data is reused when its annotation hash and preparation settings match
+and every expected image and label exists. Moving the same dataset from Windows
+to Databricks is allowed. The code refreshes `dataset.yaml` for the current
+location and reports genuine settings differences by name. The raw
+`annotations.json` must still be present for that check.
+
+## Local experiments and saved outputs
+
+Edit `DEFAULT_EXPERIMENT` in `taco_yolo.py`, then run:
 
 ```powershell
 .\.venv\Scripts\python.exe -B taco_yolo.py
 ```
 
-This prepares/reuses the dataset, trains, evaluates the best weights on validation,
-and saves prediction comparisons. Defaults are 60 epochs, 640-pixel images, batch 8,
-and automatic CUDA/CPU selection. `patience=20` enables early stopping; set it to 0
-to run every requested epoch. `weights` can point at an existing TACO `best.pt` to
-start a new training schedule from its learned weights.
+The default local experiment uses 60 epochs and automatic CUDA/CPU selection.
+The CLI also provides `prepare`, `train`, `evaluate`, and `predict`; use
+`python taco_yolo.py <command> --help` for their options.
 
-Each run saves its full configuration in `run_config.json` and output paths in
-`artifacts.json`, alongside `results.png`, weights, validation metrics/plots, and
-prediction comparisons. Repeated experiment names get a suffix automatically; the
-entrypoint uses the actual returned path for evaluation and visualization. Existing
-`prepare`, `train`, `evaluate`, and `predict` CLI commands still work. Training and
-evaluation also accept `--project` to choose where outputs are stored.
+Each experiment keeps:
 
-## Run and visualize in Databricks
+- `weights/best.pt` and `weights/last.pt`.
+- `results.csv`, `results.png`, and `events.out.tfevents.*`.
+- `validation/metrics.json`, per-class metrics, and evaluation plots.
+- `predictions/` with ground-truth/prediction comparisons.
+- `run_config.json` and `artifacts.json`.
 
-1. Import `taco_databricks.py` as a notebook, and upload `taco_yolo.py` as a regular
-   workspace file beside it. Set `CODE_DIR` in the notebook if the module is elsewhere.
-2. Attach compute with Databricks Runtime ML; select GPU compute for CUDA training.
-3. Upload the complete `data/raw/taco` directory, including `annotations.json` and
-   all image batches, into a writable Unity Catalog volume. The raw data and local
-   model checkpoints are excluded from Git and must be uploaded separately.
-4. Change `TACO_ROOT` in the notebook to your `/Volumes/catalog/schema/volume/trash_yolo`
-   directory and edit `CONFIG`. It exposes dataset/output paths, epochs, resolution,
-   batch size, device, learning rate, training fraction, frozen layers, seed, split
-   ratios, prediction count, and confidence threshold.
-5. Run the cells in order. The installation cell installs Ultralytics while reusing
-   the ML runtime's PyTorch/CUDA installation. Preparation generates Databricks paths;
-   upload raw data rather than reusing a Windows-generated prepared directory.
-6. The final cell displays validation metrics and per-class tables, learning curves,
-   the confusion matrix, precision-recall curves, and ground-truth/prediction images.
-   Rerun just that cell to view the saved results without another training run.
+The completed Databricks smoke run is in
+`/Volumes/workspace/default/tacotrashdata/reports/taco_yolo/databricks_small_gpu`.
+It ran 2 epochs on NVIDIA A10G, using 113 training images and all 197 validation
+images. Validation mAP50 was 0.64% and mAP50-95 was 0.43%; this is a short
+pipeline demonstration. The test split is reserved for final scoring.
+Additional completed runs receive numbered experiment directories.
 
-`TACO_HOME` sets the base directory for default data, weight, cache, and result paths
-before importing `taco_yolo`. The notebook sets it to `TACO_ROOT`, so code can live in
-the workspace while data and results stay in the volume. The first training run
-downloads the selected pretrained weights; you can also upload them into
-`TACO_ROOT/data/yolo/weights`.
-
-To reopen an entrypoint experiment in a later notebook session:
-
-```python
-from taco_yolo import display_results
-display_results("/Volumes/catalog/schema/volume/trash_yolo/reports/taco_yolo/databricks_taco",
-                table_display=display)
-```
-
-Databricks supports [source notebooks with cell markers](https://docs.databricks.com/aws/en/notebooks/notebook-export-import)
-and [Python modules beside notebooks](https://docs.databricks.com/aws/en/files/workspace-modules).
-
-## Run it in PowerShell
-
-The environment is already installed for this project. Select
-`.venv/Scripts/python.exe` as your IDE interpreter. For a fresh checkout, set it up
-with these commands (reuse an existing `.venv` instead of recreating it):
+## Verify the code
 
 ```powershell
-uv venv .venv
-uv pip install --python .venv\Scripts\python.exe --index-url https://download.pytorch.org/whl/cpu torch==2.9.1 torchvision==0.24.1
-uv pip install --python .venv\Scripts\python.exe -r requirements-yolo.txt
-.\.venv\Scripts\python.exe -B taco_yolo.py prepare
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
 ```
 
-The raw release stays in `data/raw/taco`. Preparation writes
-`data/yolo/taco/dataset.yaml`, image copies, YOLO text labels, and a split manifest.
-It applies EXIF rotation before resizing to at most 1280 pixels, preserving aspect
-ratio. Normalized box coordinates stay valid after resizing. COCO boxes that extend
-outside the image are clipped; every clipping/skipping decision is recorded in
-`split_manifest.json`.
+References:
 
-Splits are reproducible with seed 42. Entire source batches stay together, reducing
-leakage from nearby or similar photos. This is a local split, not an official TACO
-benchmark split. It cannot guarantee that every related scene across different
-batches is separated. Some rare classes may be absent from training or evaluation.
-
-Train a full experiment:
-
-```powershell
-.\.venv\Scripts\python.exe -B taco_yolo.py train --epochs 60 --imgsz 640 --name taco
-```
-
-On a configured CUDA machine, add `--device 0`. CPU training works but is slower.
-The installation above uses the official CPU wheels tested on this Windows PC;
-for CUDA, install the corresponding PyTorch GPU build instead. The newest CPU
-build was blocked by Windows Application Control, while 2.9.1 loaded successfully.
-The first training run downloads `yolo11n.pt` into `data/yolo/weights`.
-Each experiment gets its own folder; when a name already exists, Ultralytics adds
-a numeric suffix. Use the actual printed experiment path in subsequent commands.
-
-The example run for this task uses a smaller input and freezes the first ten
-backbone layers to fit a CPU demonstration:
-
-```powershell
-.\.venv\Scripts\python.exe -B taco_yolo.py train --epochs 12 --imgsz 320 --batch 8 --freeze 10 --name demo --threads 4 --device cpu
-```
-
-Its successful run is saved under `reports/taco_yolo/demo-2`. The earlier `demo`
-folder records an interrupted setup attempt without trained weights. Full training
-defaults above use 640-pixel inputs and leave the backbone trainable.
-
-## Results from the saved CPU demonstration
-
-The best checkpoint comes from epoch 11 of the 12-epoch run. A separate evaluation
-of that saved checkpoint used all 197 validation images and their 709 objects:
-
-| Measure | Result |
-|---|---:|
-| Mean precision | 48.88% |
-| Mean recall | 10.65% |
-| mAP50 | 9.58% |
-| mAP50-95 | 7.31% |
-
-These are weak baseline results. Scores average over the 52 classes present in
-validation, not all 60 possible classes. High mean precision alongside low recall
-does not establish a useful detector; read both alongside AP and the failure images.
-The test set has not been used to choose these weights or settings.
-
-Artifacts:
-
-- Weights: `reports/taco_yolo/demo-2/weights/best.pt`.
-- Learning curves: `reports/taco_yolo/demo-2/results.png`.
-- Evaluation: `reports/taco_yolo/validation_demo/metrics.json` and `per_class.csv`.
-- Six fixed validation examples: `reports/taco_yolo/predictions/image_000778.jpg`
-  through `image_000783.jpg`, with matching JSON files.
-
-In `image_000782.jpg`, the model correctly detects the clear plastic bottle at
-confidence 0.495 and misses its small cap: one true positive, zero false positives,
-and one false negative at confidence 0.25 and IoU 0.50. Other saved examples contain
-misses and class confusions, so this example should not stand in for overall accuracy.
-
-The class breakdown helps explain this difference:
-
-| Class | Validation objects | AP50 |
-|---|---:|---:|
-| Clear plastic bottle | 46 | 35.13% |
-| Plastic bottle cap | 23 | 6.74% |
-| Aerosol | 1 | 99.50% |
-
-The aerosol score relies on a single object and is not a reliable estimate of
-generalization. Bottle caps are clearly a weakness in this run. Training at a higher
-resolution is a reasonable next experiment for small objects; measure the change
-on the same validation split rather than assuming it helps.
-
-Reproduce the example with the saved checkpoint:
-
-```powershell
-.\.venv\Scripts\python.exe -B taco_yolo.py predict --weights reports/taco_yolo/demo-2/weights/best.pt --imgsz 320 --split val --image-id 782 --conf 0.25
-```
-
-Re-evaluate it in a new output directory:
-
-```powershell
-.\.venv\Scripts\python.exe -B taco_yolo.py evaluate --weights reports/taco_yolo/demo-2/weights/best.pt --imgsz 320 --split val --name validation_repeat
-```
-
-Validate and save predictions:
-
-```powershell
-.\.venv\Scripts\python.exe -B taco_yolo.py evaluate --weights reports/taco_yolo/taco/weights/best.pt --split val --name validation
-.\.venv\Scripts\python.exe -B taco_yolo.py predict --weights reports/taco_yolo/taco/weights/best.pt --split val --conf 0.25
-```
-
-Inspect a particular validation example with `--image-id 123`. The command rejects
-IDs from other splits. To use your own photo:
-
-```powershell
-.\.venv\Scripts\python.exe -B taco_yolo.py predict --weights reports/taco_yolo/taco/weights/best.pt --source path/to/photo.jpg
-```
-
-After choosing hyperparameters and the confidence threshold using validation,
-evaluate the test set once:
-
-```powershell
-.\.venv\Scripts\python.exe -B taco_yolo.py evaluate --weights reports/taco_yolo/taco/weights/best.pt --split test --name final_test
-```
-
-## What YOLO learns
-
-A forward pass processes the whole image. The backbone extracts visual features,
-the neck combines them at multiple scales, and the detection head predicts object
-boxes and class scores. Training adjusts these predictions toward the labeled
-boxes and classes. YOLO11 also removes overlapping duplicate predictions during
-postprocessing. Transfer learning helps because the pretrained backbone already
-recognizes useful shapes and textures, but the original COCO class names are not
-TACO's class names. The model must learn the new TACO detection task.
-
-Each generated label row is:
-
-```text
-class_id center_x center_y width height
-```
-
-Coordinates are fractions of image width/height, between 0 and 1. Category IDs are
-mapped explicitly to contiguous YOLO IDs; `dataset.yaml` records the class names.
-Only bounding boxes are used here. TACO segmentation polygons remain in the raw JSON.
-
-## Read a result image
-
-The left panel shows the dataset's ground-truth boxes in green. The right panel
-shows the model's predicted boxes in orange, with class names and confidence scores.
-
-For the displayed example, a true positive requires the right class and at least
-0.50 intersection-over-union (IoU). Each ground-truth object can match only one
-prediction. A wrong-class box counts as both a false positive for the prediction
-and a missed ground-truth object. Duplicate predictions count as false positives.
-The accompanying JSON saves boxes, scores, and example TP/FP/FN counts.
-
-Confidence is the model's ranking score, not a guaranteed probability of being
-correct. Raising `--conf` usually removes weak detections and misses more objects;
-lowering it usually finds more objects and introduces more false alarms. A pretty
-example is useful for debugging, but does not measure overall model performance.
-
-## Analyze the model
-
-Start with `metrics.json` and `per_class.csv` in the evaluation directory:
-
-| Metric | Meaning | What a low value suggests |
-|---|---|---|
-| Precision | TP / (TP + FP): how many reported objects are correct | Too many false alarms or class confusions |
-| Recall | TP / (TP + FN): how many labeled objects are found | Missed litter, especially small or obscured objects |
-| mAP50 | Mean area under per-class precision-recall curves at IoU 0.50 | Weak classification and/or localization |
-| mAP50-95 | AP averaged over IoU 0.50, 0.55, ..., 0.95 | Boxes are inaccurate even when the broad object is found |
-
-Scores are stored on a 0-1 scale; 0.30 means 30%. There is no single universal
-"good" score for TACO. Compare models on the same split, resolution, and metric.
-The exported precision and recall are class averages, not pooled counts across
-all objects. AP is also averaged only over classes with ground-truth support in
-the selected split; `evaluated_classes` records how many were included.
-Ultralytics reports aggregate precision/recall near the confidence operating point
-that maximizes mean F1; they are not necessarily measured at the `predict` command's
-0.25 threshold. AP uses detections over a sweep of confidence thresholds. Evaluation
-starts at confidence 0.001 so weak predictions remain available for that sweep.
-
-Use these saved plots together:
-
-1. **`results.png` / `results.csv` in the training folder.** Watch validation mAP
-   and box/classification/distribution-focal losses across epochs. Training loss
-   falling while validation performance deteriorates suggests overfitting. Both
-   staying poor can mean too little training, weak labels, or a difficult setup.
-   Training augmentation makes training and validation loss imperfectly comparable.
-2. **`BoxPR_curve.png` and `BoxF1_curve.png` in the evaluation folder.** PR shows
-   the precision/recall tradeoff; F1 helps choose a confidence threshold. Plot
-   filenames can vary with the installed Ultralytics version.
-3. **`confusion_matrix_normalized.png`.** Look for classes confused with each other.
-   Read the axis labels: a background row/column represents missed objects or
-   unmatched predictions, rather than an extra TACO class.
-4. **`per_class.csv`.** Inspect object support as well as AP. A high score from two
-   objects is much less reliable than a similar score from hundreds. Missing classes
-   have blank metrics, not invented zero-performance estimates.
-5. **Prediction comparisons.** Inspect easy, crowded, small-object, and failure
-   cases. The default examples use fixed image IDs, not selection based on success.
-
-TACO is small and highly imbalanced. Distinguishing all 60 labels is difficult:
-cigarettes and plastic film have far more examples than batteries or rare packages.
-Batch-based splits can also expose strong domain shifts. An aggregate mAP can hide
-failure on an important class, so always inspect class support and failure images.
-
-Improve one thing at a time: train longer if validation still improves, increase
-resolution for small objects, try `--weights yolo11s.pt`, or collect more examples
-of weak classes. Use the validation split for these decisions. Keep test examples
-out of tuning and model selection. A brief CPU demonstration is a working baseline,
-not evidence of a deployment-ready detector.
-
-## Check the implementation
-
-```powershell
-python -B -m unittest discover -s tests -v
-```
-
-The tests cover coordinate conversion, invalid/clipped boxes, batch split isolation,
-EXIF rotation, class ID mapping, source preservation, and one-to-one detection
-matching. The full training/evaluation run verifies the package integration.
-
-Official references:
-
-- [YOLO11 architecture and pretrained models](https://docs.ultralytics.com/models/yolo11/)
-- [Training arguments](https://docs.ultralytics.com/modes/train/)
-- [YOLO labels and dataset YAML](https://docs.ultralytics.com/datasets/detect/)
-- [Evaluation metrics](https://docs.ultralytics.com/guides/yolo-performance-metrics/)
+- [TensorBoard in Databricks](https://docs.databricks.com/aws/en/machine-learning/train-model/tensorboard)
+- [Ultralytics TensorBoard integration](https://docs.ultralytics.com/integrations/tensorboard/)
+- [YOLO training arguments](https://docs.ultralytics.com/modes/train/)
+- [TensorBoard documentation](https://www.tensorflow.org/tensorboard)

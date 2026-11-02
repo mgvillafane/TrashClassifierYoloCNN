@@ -1,0 +1,35 @@
+# This is a Declarative Automation Bundle definition for TrashClassifierYoloCNN.
+# The Databricks extension requires databricks.yml configuration file.
+# See https://docs.databricks.com/dev-tools/bundles/index.html for documentation.
+
+bundle:
+  name: TrashClassifierYoloCNN
+
+resources:
+  jobs:
+    taco_small_gpu:
+      name: taco_small_gpu
+      max_concurrent_runs: 1
+      timeout_seconds: 1800
+      tasks:
+        - task_key: train_taco
+          compute:
+            hardware_accelerator: GPU_1xA10
+          environment_key: gpu
+          notebook_task:
+            notebook_path: ./taco_databricks.py
+            source: WORKSPACE
+            base_parameters:
+              code_dir: ${workspace.file_path}
+      environments:
+        - environment_key: gpu
+          spec:
+            environment_version: '6'
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://dbc-fd89e1b5-e4fc.cloud.databricks.com
+
