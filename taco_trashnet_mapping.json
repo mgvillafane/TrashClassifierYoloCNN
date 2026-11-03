@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "description": "Project mapping of TACO object categories to TrashNet's six class names. This is an approximation, not an official TrashNet conversion or a recycling policy.",
+  "class_names": ["cardboard", "glass", "metal", "paper", "plastic", "trash"],
+  "groups": {
+    "cardboard": ["Toilet tube", "Other carton", "Egg carton", "Corrugated carton", "Meal carton", "Pizza box"],
+    "glass": ["Glass bottle", "Broken glass", "Glass cup", "Glass jar"],
+    "metal": ["Aluminium foil", "Metal bottle cap", "Food Can", "Aerosol", "Drink can", "Metal lid", "Pop tab", "Scrap metal"],
+    "paper": ["Paper cup", "Magazine paper", "Wrapping paper", "Normal paper", "Paper bag", "Paper straw"],
+    "plastic": ["Other plastic bottle", "Clear plastic bottle", "Plastic bottle cap", "Disposable plastic cup", "Foam cup", "Other plastic cup", "Plastic lid", "Other plastic", "Plastic film", "Six pack rings", "Garbage bag", "Other plastic wrapper", "Single-use carrier bag", "Polypropylene bag", "Spread tub", "Tupperware", "Disposable food container", "Foam food container", "Other plastic container", "Plastic glooves", "Plastic utensils", "Plastic straw", "Styrofoam piece"],
+    "trash": ["Battery", "Aluminium blister pack", "Carded blister pack", "Drink carton", "Food waste", "Tissues", "Plastified paper bag", "Crisp packet", "Rope & strings", "Shoe", "Squeezable tube", "Unlabeled litter", "Cigarette"]
+  },
+  "policy_notes": {
+    "foam": "Foam cup, Foam food container, and Styrofoam piece are plastic by material.",
+    "paper_and_cardboard": "Paper cups/straws and cartons/boxes use their predominant material; contamination and possible coatings cannot be inferred from the category.",
+    "mixed_packaging": "Blister packs, drink cartons, plastified paper bags, crisp packets, and squeezable tubes use trash because the category does not establish a single material.",
+    "residual": "Food waste, tissues, rope, shoes, and cigarettes use the project's residual trash class.",
+    "battery": "Battery uses trash only as a six-class taxonomy fallback; this does not describe safe disposal.",
+    "unknown": "Unlabeled litter is explicitly assigned to residual trash. Its material is unknown, so this introduces label noise. New or misspelled categories cause an error rather than silently falling back."
+  }
+}

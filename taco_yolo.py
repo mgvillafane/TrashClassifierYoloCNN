@@ -26,7 +26,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 ROOT = Path(__file__).resolve().parent
 STORAGE = Path(os.environ.get("TACO_HOME", ROOT)).expanduser().resolve()
 SOURCE = STORAGE / "data/raw/taco"
-PREPARED = STORAGE / "data/yolo/taco"
+PREPARED = STORAGE / "data/yolo/taco_trashnet"
+TRASHNET_MAPPING = ROOT / "taco_trashnet_mapping.json"
 RUNS = STORAGE / "reports/taco_yolo"
 # Keep package settings and caches inside this project, including on Windows.
 os.environ.setdefault("YOLO_CONFIG_DIR", str(STORAGE / "data/yolo/settings"))
@@ -40,7 +41,8 @@ class ExperimentConfig:
     prepared: Path | str = PREPARED
     project: Path | str = RUNS
     weights: Path | str = "yolo26m.pt"  # Or a TACO-trained best.pt to fine-tune.
-    name: str = "taco"
+    name: str = "taco_trashnet"
+    label_scheme: str = "trashnet"
     epochs: int = 2
     imgsz: int = 640
     batch: int = 8
@@ -70,7 +72,7 @@ DEFAULT_EXPERIMENT = ExperimentConfig(
     patience=0,
     lr=0.001,
     weights="yolo26m.pt",
-    name="taco",
+    name="taco_trashnet",
     prediction_count=8,
     conf=0.25,
 )
@@ -141,14 +143,58 @@ def prepared_files_exist(output, records):
     return True
 
 
-def prepare(source=SOURCE, output=PREPARED, seed=42, max_side=1280, val_ratio=0.15, test_ratio=0.15):
+def dataset_classes(categories, label_scheme):
+    """Resolve labels by category name; unknown materials never silently become trash."""
+    categories = sorted(categories, key=lambda category: category["id"])
+    if label_scheme == "taco":
+        return ({i: category["name"] for i, category in enumerate(categories)},
+                {category["id"]: i for i, category in enumerate(categories)}, None)
+    if label_scheme != "trashnet":
+        raise ValueError(f"Unknown label scheme: {label_scheme}")
+    policy = json.loads(TRASHNET_MAPPING.read_text(encoding="utf-8"))
+    expected = ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
+    if policy["class_names"] != expected or set(policy["groups"]) != set(expected):
+        raise ValueError("TrashNet mapping must define the six classes in the documented ID order")
+    names = dict(enumerate(expected))
+    by_name = {}
+    for class_id, name in names.items():
+        for category in policy["groups"][name]:
+            if category in by_name:
+                raise ValueError(f"Duplicate mapping for TACO category: {category}")
+            by_name[category] = class_id
+    missing = sorted({category["name"] for category in categories} - by_name.keys())
+    if missing:
+        raise ValueError(f"TACO categories need explicit TrashNet mappings: {missing}")
+    class_ids = {category["id"]: by_name[category["name"]] for category in categories}
+    digest = hashlib.sha256(json.dumps(policy, sort_keys=True).encode("utf-8")).hexdigest()
+    report = {"label_scheme": label_scheme, "mapping_sha256": digest, "policy": policy,
+              "categories": [{"taco_id": category["id"], "taco_name": category["name"],
+                              "class_id": class_ids[category["id"]],
+                              "class_name": names[class_ids[category["id"]]]}
+                             for category in categories]}
+    return names, class_ids, report
+
+
+def prepare(source=SOURCE, output=None, seed=42, max_side=1280, val_ratio=0.15, test_ratio=0.15,
+            label_scheme="taco", image_cache=None):
+    # Direct legacy prepare() calls keep their original TACO behavior. Experiments
+    # and the CLI explicitly select trashnet and its separate output directory.
+    if output is None:
+        output = STORAGE / "data/yolo" / ("taco" if label_scheme == "taco" else "taco_trashnet")
     source, output = Path(source).resolve(), Path(output).resolve()
     annotation_path = source / "annotations.json"
     payload = annotation_path.read_bytes()
     coco = json.loads(payload)
+    names, class_ids, mapping = dataset_classes(coco["categories"], label_scheme)
+    if mapping:
+        counts = Counter(annotation["category_id"] for annotation in coco["annotations"])
+        for category in mapping["categories"]:
+            category["source_annotations"] = counts[category["taco_id"]]
     configuration = {"version": 1, "annotation_sha256": hashlib.sha256(payload).hexdigest(),
                      "source": str(source), "seed": seed, "max_side": max_side,
                      "val_ratio": val_ratio, "test_ratio": test_ratio, "split_method": "source_batch"}
+    if mapping:
+        configuration.update(label_scheme=label_scheme, mapping_sha256=mapping["mapping_sha256"])
     manifest_path = output / "split_manifest.json"
     if manifest_path.exists():
         previous = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -166,12 +212,24 @@ def prepare(source=SOURCE, output=PREPARED, seed=42, max_side=1280, val_ratio=0.
                 "Choose another --output directory (or CONFIG.prepared).")
         if prepared_files_exist(output, previous["images"]):
             data = write_dataset_yaml(output, previous["class_names"])
+            if mapping:
+                write_json(output / "label_mapping.json", mapping)
             print(f"Reusing prepared data: {data}", flush=True)
             return data
     if max_side < 32:
         raise ValueError("max_side must be at least 32")
-    categories = sorted(coco["categories"], key=lambda c: c["id"])
-    class_ids = {category["id"]: index for index, category in enumerate(categories)}
+    cached_images = None
+    if image_cache is not None:
+        image_cache = Path(image_cache).resolve()
+        if image_cache == output:
+            raise ValueError("The image cache must be a different prepared dataset directory")
+        cached = json.loads((image_cache / "split_manifest.json").read_text(encoding="utf-8"))
+        ignored = {"source", "label_scheme", "mapping_sha256"}
+        cached_settings = {key: value for key, value in cached["configuration"].items() if key not in ignored}
+        settings = {key: value for key, value in configuration.items() if key not in ignored}
+        if cached_settings != settings or not prepared_files_exist(image_cache, cached["images"]):
+            raise ValueError("The image cache must have matching annotations, image settings, and splits, and complete files")
+        cached_images = {row["image_id"]: row for row in cached["images"]}
     annotations = defaultdict(list)
     for annotation in coco["annotations"]:
         annotations[annotation["image_id"]].append(annotation)
@@ -187,13 +245,19 @@ def prepare(source=SOURCE, output=PREPARED, seed=42, max_side=1280, val_ratio=0.
         label_path = output / "labels" / split / f"{stem}.txt"
         image_path.parent.mkdir(parents=True, exist_ok=True)
         label_path.parent.mkdir(parents=True, exist_ok=True)
-        with Image.open(source_path) as raw:
-            # TACO coordinates use the upright image. Bake EXIF rotation into a copy.
-            rgb = ImageOps.exif_transpose(raw).convert("RGB")
-            if rgb.size != (image["width"], image["height"]):
-                raise ValueError(f"Annotation canvas mismatch for {source_path}: {rgb.size}")
-            rgb.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
-            rgb.save(image_path, quality=92)
+        if cached_images is not None:
+            cached_image = cached_images[image["id"]]
+            if cached_image["source_file"] != image["file_name"] or cached_image["split"] != split:
+                raise ValueError(f"Image cache source or split differs for image {image['id']}")
+            shutil.copyfile(image_cache / cached_image["image"], image_path)
+        else:
+            with Image.open(source_path) as raw:
+                # TACO coordinates use the upright image. Bake EXIF rotation into a copy.
+                rgb = ImageOps.exif_transpose(raw).convert("RGB")
+                if rgb.size != (image["width"], image["height"]):
+                    raise ValueError(f"Annotation canvas mismatch for {source_path}: {rgb.size}")
+                rgb.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+                rgb.save(image_path, quality=92)
         labels = []
         for annotation in annotations[image["id"]]:
             if annotation.get("iscrowd", 0):
@@ -215,13 +279,14 @@ def prepare(source=SOURCE, output=PREPARED, seed=42, max_side=1280, val_ratio=0.
                         "class_ids": [row[0] for row in labels]})
         if (index + 1) % 100 == 0:
             print(f"Prepared {index + 1}/{len(coco['images'])} images", flush=True)
-    names = {i: category["name"] for i, category in enumerate(categories)}
     data = write_dataset_yaml(output, names)
     split_counts = Counter(row["split"] for row in records)
     class_counts = {split: Counter(cls for row in records if row["split"] == split for cls in row["class_ids"])
                     for split in ("train", "val", "test")}
     write_json(manifest_path, {"configuration": configuration, "class_names": names, "image_counts": dict(split_counts),
                                "class_counts": class_counts, "issues": issues, "images": records})
+    if mapping:
+        write_json(output / "label_mapping.json", mapping)
     print(f"Prepared {dict(split_counts)}; {len(issues)} annotation notes. {output / 'dataset.yaml'}", flush=True)
     return data
 
@@ -250,7 +315,8 @@ def resolve_weights(value):
 def check_class_names(names, manifest):
     expected = {int(key): value for key, value in manifest["class_names"].items()}
     if names != expected:
-        raise ValueError("These weights do not have this dataset's TACO classes. Use a TACO-trained best.pt checkpoint.")
+        raise ValueError("These weights do not match the dataset's class names/IDs. Use a TACO-trained best.pt "
+                         "with the same label scheme (60 TACO classes or six TrashNet classes).")
 
 
 def train(args):
@@ -487,7 +553,8 @@ def run_experiment(config=None):
         device = "0" if torch.cuda.is_available() else "cpu"
     print(f"Training device: {device}; requested epochs: {config.epochs}", flush=True)
     prepared = Path(config.prepared).expanduser().resolve()
-    data = prepare(source, prepared, config.seed, config.max_side, config.val_ratio, config.test_ratio)
+    data = prepare(source, prepared, config.seed, config.max_side, config.val_ratio, config.test_ratio,
+                   label_scheme=config.label_scheme)
     arguments = asdict(config)
     arguments.update(source=source, prepared=prepared, data=data, device=device,
                      project=Path(config.project).expanduser().resolve())
@@ -642,15 +709,17 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     prep = commands.add_parser("prepare", help="Convert COCO boxes, orient copies, and split by batch")
     prep.add_argument("--source", type=Path, default=SOURCE)
-    prep.add_argument("--output", type=Path, default=PREPARED)
+    prep.add_argument("--output", type=Path, help="Default: data/yolo/taco_trashnet, or data/yolo/taco for --label-scheme taco")
     prep.add_argument("--seed", type=int, default=42)
     prep.add_argument("--max-side", type=int, default=1280)
     prep.add_argument("--val-ratio", type=float, default=0.15)
     prep.add_argument("--test-ratio", type=float, default=0.15)
+    prep.add_argument("--label-scheme", choices=("taco", "trashnet"), default="trashnet")
+    prep.add_argument("--image-cache", type=Path, help="Copy identical images from a prepared dataset with matching settings")
     for name in ("train", "evaluate", "predict"):
         sub = commands.add_parser(name)
         sub.add_argument("--data", type=Path, default=PREPARED / "dataset.yaml")
-        sub.add_argument("--weights", default=DEFAULT_EXPERIMENT.weights if name == "train" else str(RUNS / "taco/weights/best.pt"))
+        sub.add_argument("--weights", default=DEFAULT_EXPERIMENT.weights if name == "train" else str(RUNS / "taco_trashnet/weights/best.pt"))
         sub.add_argument("--imgsz", type=int, default=640)
         sub.add_argument("--device", default="cpu", help="cpu, or 0 for the first CUDA GPU")
         sub.add_argument("--threads", type=int, default=4)
@@ -664,7 +733,7 @@ def main(argv=None):
             sub.add_argument("--fraction", type=float, default=1.0)
             sub.add_argument("--freeze", type=int, default=0, help="Number of initial layers to freeze")
             sub.add_argument("--lr", type=float, default=0.001)
-            sub.add_argument("--name", default="taco")
+            sub.add_argument("--name", default=DEFAULT_EXPERIMENT.name)
         elif name == "evaluate":
             sub.add_argument("--project", type=Path, default=RUNS)
             sub.add_argument("--split", choices=("val", "test"), default="val")
@@ -679,7 +748,8 @@ def main(argv=None):
             sub.add_argument("--output", type=Path, default=RUNS / "predictions")
     args = parser.parse_args(argv)
     if args.command == "prepare":
-        prepare(args.source, args.output, args.seed, args.max_side, args.val_ratio, args.test_ratio)
+        prepare(args.source, args.output, args.seed, args.max_side, args.val_ratio, args.test_ratio,
+                label_scheme=args.label_scheme, image_cache=args.image_cache)
     elif args.command == "train":
         if args.epochs < 1 or args.batch < 1 or not 0 < args.fraction <= 1:
             parser.error("epochs/batch must be positive and fraction must be in (0, 1]")

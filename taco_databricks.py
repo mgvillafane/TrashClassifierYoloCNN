@@ -1,8 +1,8 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # TACO YOLO26 Medium GPU experiment
+# MAGIC # TACO with TrashNet labels: YOLO26 Medium GPU experiment
 # MAGIC Import this file as a Databricks notebook. Upload `taco_yolo.py` as a regular
-# MAGIC workspace file beside it, and put the complete raw TACO dataset in a writable
+# MAGIC workspace file beside it with `taco_trashnet_mapping.json`, and put the raw TACO dataset in a writable
 # MAGIC Unity Catalog volume. The `taco_small_gpu` bundle job requests one A10 GPU.
 # MAGIC **VS Code:** open the Databricks sidebar, expand Bundle Resource Explorer,
 # MAGIC select `taco_small_gpu`, and click its play button (Deploy and Run).
@@ -11,6 +11,8 @@
 # MAGIC The editor's Run File as Workflow command uses the selected compute; it does
 # MAGIC not apply the GPU settings from the bundle job.
 # MAGIC This run uses YOLO26 Medium, 2 epochs, 640-pixel inputs, and all training images.
+# MAGIC Labels are cardboard, glass, metal, paper, plastic, and trash. The explicit
+# MAGIC mapping is a project approximation; review its mixed-material and unknown-litter policy.
 # MAGIC Run the cells in order. Edit the configuration cell to change the experiment.
 # MAGIC TensorBoard publishes each completed epoch while training continues.
 # MAGIC Interactive runs show the viewer before training. For a bundle job, open
@@ -52,13 +54,16 @@ print("Training GPU:", torch.cuda.get_device_name(0))
 
 # CHANGE THIS to a directory in a volume you can read and write.
 # Expected uploaded data: TACO_ROOT/taco/annotations.json and batch_* folders.
-TACO_ROOT = Path("/Volumes/workspace/default/tacotrashdata")
+dbutils.widgets.text("taco_root", "/Volumes/workspace/default/tacotrashdata")
+TACO_ROOT = Path(dbutils.widgets.get("taco_root"))
 dbutils.widgets.text("code_dir", str(Path.cwd()))
 CODE_DIR = Path(dbutils.widgets.get("code_dir"))
 if "<" in str(TACO_ROOT):
     raise ValueError("Set TACO_ROOT to your /Volumes/catalog/schema/volume/trash_yolo directory.")
 if not (CODE_DIR / "taco_yolo.py").is_file():
     raise FileNotFoundError("Upload taco_yolo.py beside this notebook, or change CODE_DIR to its directory.")
+if not (CODE_DIR / "taco_trashnet_mapping.json").is_file():
+    raise FileNotFoundError("Upload taco_trashnet_mapping.json beside taco_yolo.py, or deploy the bundle.")
 
 # Keep data, downloaded weights, and caches in the selected volume.
 # Stage outputs locally: Unity Catalog volumes do not support CSV append/seek.
@@ -73,12 +78,13 @@ from ultralytics.utils.files import increment_path
 settings.update({"mlflow": False, "tensorboard": True})
 
 LOCAL_RUN_ROOT = tempfile.TemporaryDirectory(prefix="taco_yolo_")
-SAVED_RUN_DIR = increment_path(TACO_ROOT / "reports/taco_yolo/databricks_yolo26m_2epochs", mkdir=True)
+SAVED_RUN_DIR = increment_path(TACO_ROOT / "reports/taco_yolo/databricks_trashnet_yolo26m_2epochs", mkdir=True)
 CONFIG = ExperimentConfig(
     source=TACO_ROOT / "taco",
-    prepared=TACO_ROOT / "yolo/taco",
+    prepared=TACO_ROOT / "yolo/taco_trashnet",
+    label_scheme="trashnet",
     project=Path(LOCAL_RUN_ROOT.name),
-    name="databricks_yolo26m_2epochs",
+    name="databricks_trashnet_yolo26m_2epochs",
     weights=TACO_ROOT / "yolo/weights/yolo26m.pt",  # Reuse the uploaded pretrained weights.
     epochs=2,
     imgsz=640,
@@ -165,7 +171,7 @@ dbutils.widgets.text("code_dir", str(Path.cwd()))
 sys.path.insert(0, dbutils.widgets.get("code_dir"))
 from taco_yolo import test_saved_run
 
-RUN_TO_TEST = Path("/Volumes/workspace/default/tacotrashdata/reports/taco_yolo/databricks_yolo26m_2epochs")
+RUN_TO_TEST = Path("/Volumes/workspace/default/tacotrashdata/reports/taco_yolo/databricks_trashnet_yolo26m_2epochs")
 TEST_DIR = test_saved_run(RUN_TO_TEST)
 TEST_METRICS = json.loads((TEST_DIR / "metrics.json").read_text())
 print("Held-out test metrics (0 to 1):", {

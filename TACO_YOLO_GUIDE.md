@@ -1,12 +1,17 @@
 # TACO object detection with YOLO26
 
-This project fine-tunes a pretrained YOLO26 Medium detector on TACO's 60 classes. It supports
-local training and the uploaded dataset in Databricks. Raw images and source
-annotations remain unchanged.
+This project fine-tunes a pretrained YOLO26 Medium detector on TACO boxes mapped
+to TrashNet's six labels: cardboard, glass, metal, paper, plastic, and trash.
+The original 60-class prepared dataset and historical experiments are retained.
+It supports local training and Databricks. Raw images and source annotations
+remain unchanged.
 
 ## Project files
 
 - `taco_yolo.py`: prepare, train, validate, predict, and visualize results.
+- `taco_trashnet_mapping.json`: explicit mapping for all 60 original categories and policy notes.
+- `taco_label_preview.py`: verify every relabeled box and create before/after images.
+- `sync_taco_databricks.py`: upload prepared labels/images to the UC volume and deploy without training.
 - `taco_databricks.py`: the Databricks GPU experiment and TensorBoard viewer.
 - `databricks.yml`: the `taco_small_gpu` job on one serverless A10 GPU.
 - `requirements-yolo.txt`: dependencies for local training and visualization.
@@ -22,9 +27,11 @@ The uploaded volume is `/Volumes/workspace/default/tacotrashdata`:
 ```text
 taco/annotations.json         Raw COCO annotations
 taco/batch_*/                Raw images
-yolo/taco/images/            Prepared images
-yolo/taco/labels/            YOLO labels
-yolo/taco/dataset.yaml       Dataset configuration
+yolo/taco_trashnet/images/   Prepared images (same pixels as the original prepared dataset)
+yolo/taco_trashnet/labels/   Six-class YOLO labels
+yolo/taco_trashnet/dataset.yaml       Dataset configuration with volume paths
+yolo/taco_trashnet/label_mapping.json Mapping, policy, and source annotation counts
+yolo/taco_trashnet/split_manifest.json Split membership, counts, and mapping hash
 yolo/weights/yolo26m.pt      Pretrained YOLO26 Medium weights
 reports/taco_yolo/           Saved experiments
 ```
@@ -47,6 +54,10 @@ Edit `CONFIG` in `taco_databricks.py` to change the experiment. Its default
 uses YOLO26 Medium for 2 epochs, 640-pixel images, batch 8, the full 1,126-image
 training split (`fraction=1.0`), and two prediction examples. Early stopping is
 disabled (`patience=0`) so both epochs run. `device="0"` requires a GPU.
+It explicitly selects `label_scheme="trashnet"` and `yolo/taco_trashnet`.
+Start from pretrained `yolo26m.pt`; the old 60-class `best.pt` is incompatible
+with six-class evaluation. The `taco_root` bundle variable/notebook widget
+selects the UC volume.
 Increase `epochs` for a longer experiment; validation and test images stay held out.
 
 The notebook uses the headless Ultralytics package for compatibility with the
@@ -151,8 +162,9 @@ checkpoint on the remaining 177 held-out images without changing its weights.
   5-point steps. It requires more precise localization and is usually lower.
 
 These are detection-quality scores, not the percentage of images classified
-correctly. The two-epoch model's validation mAP50 of 2.75% and mAP50-95 of 1.64%
-are low scores from a short training run.
+correctly. The historical 60-class two-epoch model's validation mAP50 of 2.75%
+and mAP50-95 of 1.64% are low scores from a short training run. They are not
+six-class results. Relabeling annotations does not train or score a new model.
 
 To test a saved experiment in Databricks, run only the **Held-out TACO test**
 cell in `taco_databricks.py`, selecting `RUN_TO_TEST`. It calls
@@ -170,11 +182,67 @@ scores, and a confusion-matrix plot are also downloaded into
 
 ## Data preparation
 
+The six class IDs are fixed as `0=cardboard`, `1=glass`, `2=metal`, `3=paper`,
+`4=plastic`, and `5=trash`. These IDs are a project convention, and must be
+matched explicitly to another classifier's class order. TACO remains an object
+detection dataset; sharing TrashNet's class names does not make its images or
+annotation semantics identical to TrashNet.
+
+`taco_trashnet_mapping.json` names every original category. Foam is plastic;
+paper cups/straws use paper; boxes and non-drink cartons use cardboard.
+Blister packs, drink cartons, plastified bags, crisp packets, and squeezable
+tubes use residual trash because their category does not identify one material.
+Batteries, food waste, tissues, ropes, shoes, cigarettes, and unlabeled litter
+also use trash. In particular, unknown litter introduces label noise. This is
+an explicit project approximation, not an official conversion or disposal rule.
+Unknown new categories fail rather than being silently assigned to trash.
+
+Prepare locally, copying already oriented/resized images from the existing
+60-class dataset when its annotation hash and image/split settings match:
+
+```powershell
+.\.venv\Scripts\python.exe -B taco_yolo.py prepare --label-scheme trashnet --image-cache data/yolo/taco
+.\.venv\Scripts\python.exe -B taco_label_preview.py --image-id 601
+```
+
+The new data lives in `data/yolo/taco_trashnet`. Omitting `--image-cache` prepares
+images from raw TACO. The comparison script checks all images and objects,
+including identical coordinate text, split membership, and expected class IDs.
+It saves separate before/after images, a combined comparison, label transitions,
+and `verification.json` under `reports/taco_relabel`.
+
+The local conversion contains 1,500 images and 4,784 boxes: 206 cardboard,
+254 glass, 544 metal, 204 paper, 2,206 plastic, and 1,370 trash. It preserves
+1,126 training, 197 validation, and 177 test images. The existing seven
+annotation notes refer to clipped boundary boxes, not removed objects.
+
+Upload the new folder into the existing Unity Catalog volume and deploy the
+updated notebook/job using the configured Databricks profile:
+
+```powershell
+.\.venv\Scripts\python.exe -B sync_taco_databricks.py --dry-run
+.\.venv\Scripts\python.exe -B sync_taco_databricks.py
+```
+
+The sync script validates local data and the bundle, uploads the images, labels,
+mapping, and comparisons, writes a `dataset.yaml` with `/Volumes/...` paths,
+verifies uploaded metadata, and deploys `taco_small_gpu`. It does not start
+training. The destination is
+`/Volumes/workspace/default/tacotrashdata/yolo/taco_trashnet`; the original
+`yolo/taco` folder and raw annotations are preserved. The script prints the
+command to start training when deployment succeeds. This updates files inside
+the existing registered UC volume; it does not create a Delta table.
+
+For an original 60-class preparation, select `--label-scheme taco`. Direct Python
+calls to `prepare()` keep that legacy default; `ExperimentConfig` and the CLI
+default to the six-class scheme. Set both `label_scheme="taco"` and a separate
+`prepared` path when configuring an original-label experiment.
+
 `prepare()` reads COCO annotations, keeps each source batch in a single split,
 applies EXIF rotation to image copies, resizes them, and creates normalized YOLO
 labels. The split contains 1,126 training, 197 validation, and 177 test images.
 
-Existing data is reused when its annotation hash and preparation settings match
+Existing data is reused when its annotation hash, label mapping, and preparation settings match
 and every expected image and label exists. Moving the same dataset from Windows
 to Databricks is allowed. The code refreshes `dataset.yaml` for the current
 location and reports genuine settings differences by name. The raw
@@ -203,10 +271,10 @@ Each experiment keeps:
 - `run_config.json` and `artifacts.json`.
 
 The YOLO26 Medium Databricks experiment saves to
-`/Volumes/workspace/default/tacotrashdata/reports/taco_yolo/databricks_yolo26m_2epochs`.
+`/Volumes/workspace/default/tacotrashdata/reports/taco_yolo/databricks_trashnet_yolo26m_2epochs`.
 Additional runs receive numbered experiment directories.
 
-The verified YOLO26 Medium run completed 2 epochs on NVIDIA A10G with all 1,126
+The historical 60-class YOLO26 Medium run completed 2 epochs on NVIDIA A10G with all 1,126
 training images, 640-pixel inputs, and batch 8. Validation on 197 images gave
 mAP50 2.75% and mAP50-95 1.64%; these are results from only two training epochs.
 Both epoch logs, checkpoints, validation reports, and prediction examples were
@@ -226,6 +294,8 @@ pipeline demonstration. The test split is reserved for final scoring.
 
 References:
 
+- [Original TrashNet labels](https://github.com/garythung/trashnet#dataset)
+- [Databricks CLI volume file operations](https://docs.databricks.com/aws/en/dev-tools/cli/reference/fs-commands)
 - [TensorBoard in Databricks](https://docs.databricks.com/aws/en/machine-learning/train-model/tensorboard)
 - [Ultralytics TensorBoard integration](https://docs.ultralytics.com/integrations/tensorboard/)
 - [YOLO training arguments](https://docs.ultralytics.com/modes/train/)

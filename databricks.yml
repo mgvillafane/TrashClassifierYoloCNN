@@ -5,10 +5,16 @@
 bundle:
   name: TrashClassifierYoloCNN
 
+variables:
+  taco_root:
+    description: Unity Catalog volume holding raw TACO data, prepared labels, and runs.
+    default: /Volumes/workspace/default/tacotrashdata
+
 resources:
   jobs:
     taco_small_gpu:
       name: taco_small_gpu
+      description: Train YOLO26 Medium on TACO bounding boxes with the six TrashNet labels.
       max_concurrent_runs: 1
       timeout_seconds: 1800
       tasks:
@@ -21,6 +27,7 @@ resources:
             source: WORKSPACE
             base_parameters:
               code_dir: ${workspace.file_path}
+              taco_root: ${var.taco_root}
       environments:
         - environment_key: gpu
           spec:
