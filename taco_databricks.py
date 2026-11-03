@@ -1,6 +1,6 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Small TACO YOLO GPU experiment
+# MAGIC # TACO YOLO26 Medium GPU experiment
 # MAGIC Import this file as a Databricks notebook. Upload `taco_yolo.py` as a regular
 # MAGIC workspace file beside it, and put the complete raw TACO dataset in a writable
 # MAGIC Unity Catalog volume. The `taco_small_gpu` bundle job requests one A10 GPU.
@@ -10,9 +10,11 @@
 # MAGIC run a resource**, then select `taco_small_gpu`.
 # MAGIC The editor's Run File as Workflow command uses the selected compute; it does
 # MAGIC not apply the GPU settings from the bundle job.
-# MAGIC This short run uses 2 epochs, 320-pixel inputs, and 10% of training images.
+# MAGIC This run uses YOLO26 Medium, 2 epochs, 640-pixel inputs, and all training images.
 # MAGIC Run the cells in order. Edit the configuration cell to change the experiment.
-# MAGIC The final TensorBoard cell can also visualize a saved run without training.
+# MAGIC TensorBoard publishes each completed epoch while training continues.
+# MAGIC Interactive runs show the viewer before training. For a bundle job, open
+# MAGIC this notebook in a separate CPU session and run only the final viewer cell.
 
 # COMMAND ----------
 
@@ -66,23 +68,25 @@ os.environ["MPLCONFIGDIR"] = str(TACO_ROOT / "yolo/matplotlib")
 sys.path.insert(0, str(CODE_DIR))
 from taco_yolo import ExperimentConfig, run_experiment, display_results
 from ultralytics import settings
+from ultralytics.utils.files import increment_path
 
 settings.update({"mlflow": False, "tensorboard": True})
 
 LOCAL_RUN_ROOT = tempfile.TemporaryDirectory(prefix="taco_yolo_")
+SAVED_RUN_DIR = increment_path(TACO_ROOT / "reports/taco_yolo/databricks_yolo26m_2epochs", mkdir=True)
 CONFIG = ExperimentConfig(
     source=TACO_ROOT / "taco",
     prepared=TACO_ROOT / "yolo/taco",
     project=Path(LOCAL_RUN_ROOT.name),
-    name="databricks_small_gpu",
-    weights=TACO_ROOT / "yolo/weights/yolo11n.pt",  # Reuse the uploaded pretrained weights.
+    name="databricks_yolo26m_2epochs",
+    weights=TACO_ROOT / "yolo/weights/yolo26m.pt",  # Reuse the uploaded pretrained weights.
     epochs=2,
-    imgsz=320,
-    batch=16,
+    imgsz=640,
+    batch=8,
     device="0",  # Require the first CUDA GPU.
     patience=0,  # Run both epochs.
     lr=0.001,
-    fraction=0.1,  # Short demonstration; use 1.0 for the full training split.
+    fraction=1.0,  # Use every image in the training split; keep validation/test held out.
     freeze=0,
     workers=0,
     threads=4,
@@ -92,7 +96,17 @@ CONFIG = ExperimentConfig(
     test_ratio=0.15,
     prediction_count=2,
     conf=0.25,
+    tensorboard_dir=SAVED_RUN_DIR,
 )
+print("Live TensorBoard and saved run:", SAVED_RUN_DIR)
+
+# COMMAND ----------
+
+# Open the dashboard before training in an interactive GPU notebook.
+# A bundle job also publishes logs here; watch it from a separate CPU notebook.
+from taco_yolo import display_tensorboard
+
+display_tensorboard(SAVED_RUN_DIR, live=True)
 
 # COMMAND ----------
 
@@ -102,13 +116,13 @@ RESULTS = run_experiment(CONFIG)
 
 # Copy completed outputs into one persistent experiment folder.
 run_dir = Path(RESULTS["run_dir"])
-saved_dir = TACO_ROOT / "reports/taco_yolo" / run_dir.name
-if (saved_dir / "artifacts.json").exists():
-    from ultralytics.utils.files import increment_path
-    saved_dir = increment_path(saved_dir)
+saved_dir = SAVED_RUN_DIR
 for path in run_dir.rglob("*"):
     if path.is_file():
         target = saved_dir / path.relative_to(run_dir)
+        # Epoch files were already published; keep them immutable for live readers.
+        if path.name.startswith("events.out.tfevents.epoch") and target.is_file():
+            continue
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, target)
 RESULTS = {
@@ -136,10 +150,39 @@ dbutils.notebook.exit(json.dumps({
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Held-out TACO test
+# MAGIC Run only the next cell after choosing a trained checkpoint for final scoring.
+# MAGIC It loads the saved best.pt and scores the 177 test images without retraining.
+# MAGIC Use GPU compute for faster testing. Keep validation for tuning experiments.
+
+# COMMAND ----------
+
+import json
+import sys
+from pathlib import Path
+
+dbutils.widgets.text("code_dir", str(Path.cwd()))
+sys.path.insert(0, dbutils.widgets.get("code_dir"))
+from taco_yolo import test_saved_run
+
+RUN_TO_TEST = Path("/Volumes/workspace/default/tacotrashdata/reports/taco_yolo/databricks_yolo26m_2epochs")
+TEST_DIR = test_saved_run(RUN_TO_TEST)
+TEST_METRICS = json.loads((TEST_DIR / "metrics.json").read_text())
+print("Held-out test metrics (0 to 1):", {
+    key: TEST_METRICS[key] for key in ("precision", "recall", "mAP50", "mAP50_95", "evaluated_classes")
+})
+print("Test reports and plots:", TEST_DIR)
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## TensorBoard viewer
-# MAGIC Run only the cell below in an active notebook to view a saved experiment.
-# MAGIC It works on CPU compute and does not train. Change RUN_TO_VIEW to choose a run.
-# MAGIC Jobs finish above; an interactive TensorBoard UI needs an active notebook session.
+# MAGIC Run only the cell below in a separate active notebook to watch a GPU job live.
+# MAGIC It works on CPU compute and does not train. The default lists all saved/live runs.
+# MAGIC Fresh CPU session: install `tensorboard==2.21.0 Pillow` with `%pip install`,
+# MAGIC then run `dbutils.library.restartPython()` before the viewer cell.
+# MAGIC Select the current run in TensorBoard, or set RUN_TO_VIEW to its printed directory.
+# MAGIC The dashboard refreshes while epochs finish. Keep this notebook session active.
 # MAGIC Scalars shows losses, learning rates, precision/recall, and mAP; Images shows data examples.
 
 # COMMAND ----------
@@ -151,6 +194,6 @@ dbutils.widgets.text("code_dir", str(Path.cwd()))
 sys.path.insert(0, dbutils.widgets.get("code_dir"))
 from taco_yolo import display_tensorboard
 
-RUN_TO_VIEW = globals().get("RESULTS", {}).get(
-    "run_dir", "/Volumes/workspace/default/tacotrashdata/reports/taco_yolo/databricks_small_gpu")
-display_tensorboard(RUN_TO_VIEW)
+RUN_TO_VIEW = str(globals().get(
+    "SAVED_RUN_DIR", "/Volumes/workspace/default/tacotrashdata/reports/taco_yolo"))
+display_tensorboard(RUN_TO_VIEW, live=True)

@@ -1,6 +1,6 @@
-# TACO object detection with YOLO11
+# TACO object detection with YOLO26
 
-This project trains a YOLO11 Nano detector on TACO's 60 classes. It supports
+This project fine-tunes a pretrained YOLO26 Medium detector on TACO's 60 classes. It supports
 local training and the uploaded dataset in Databricks. Raw images and source
 annotations remain unchanged.
 
@@ -25,7 +25,7 @@ taco/batch_*/                Raw images
 yolo/taco/images/            Prepared images
 yolo/taco/labels/            YOLO labels
 yolo/taco/dataset.yaml       Dataset configuration
-yolo/weights/yolo11n.pt      Pretrained weights
+yolo/weights/yolo26m.pt      Pretrained YOLO26 Medium weights
 reports/taco_yolo/           Saved experiments
 ```
 
@@ -43,44 +43,61 @@ databricks bundle deploy -t dev
 databricks bundle run taco_small_gpu -t dev
 ```
 
-Edit `CONFIG` in `taco_databricks.py` to change the experiment. Its small default
-uses 2 epochs, 320-pixel images, batch 16, 10% of the training split, and two
-prediction examples. `device="0"` requires a GPU. Increase `fraction` to 1.0
-and increase `epochs` for a full experiment.
+Edit `CONFIG` in `taco_databricks.py` to change the experiment. Its default
+uses YOLO26 Medium for 2 epochs, 640-pixel images, batch 8, the full 1,126-image
+training split (`fraction=1.0`), and two prediction examples. Early stopping is
+disabled (`patience=0`) so both epochs run. `device="0"` requires a GPU.
+Increase `epochs` for a longer experiment; validation and test images stay held out.
 
 The notebook uses the headless Ultralytics package for compatibility with the
 server environment. It stages outputs in a writable temporary directory because
-the trainer appends to CSV files. It then copies the completed experiment into
-one folder in the volume and updates the artifact paths.
+the trainer appends to CSV files. Closed TensorBoard event files are published
+to the volume after every epoch. The remaining completed outputs are copied
+into that same experiment folder after training and evaluation finish.
 
 ## TensorBoard
 
-New training runs enable Ultralytics' TensorBoard callback automatically.
-Event files are kept inside the same experiment folder as the checkpoints and
-CSV. The callback logs losses, learning rates, validation precision/recall, mAP,
-and the model graph. A summary event file adds training-batch images, class
-distribution plots, and saved prediction comparisons.
+The Databricks experiment publishes losses, learning rates, validation
+precision/recall, and mAP after each completed epoch. Initial training-batch
+images and class distributions appear with epoch one; prediction comparisons
+appear after training. Event files stay in the same experiment folder as the
+checkpoints and CSV. Each epoch is a small closed event file, which avoids
+append/seek limitations on Unity Catalog volumes and duplicate scalar logs.
+
+Local runs without `tensorboard_dir` use Ultralytics' native TensorBoard callback,
+including its model graph. The live Databricks logger records scalars and images.
 
 ### View in Databricks
 
-Open `taco_databricks.py` as a notebook and run its final **TensorBoard viewer**
-cell in an active notebook session. Edit `RUN_TO_VIEW` to select a saved run.
-The viewer can use CPU compute; it does not train or require CUDA.
-Install the notebook's dependencies first if the session is fresh.
+For an **interactive GPU notebook**, run the setup/configuration cells, then the
+TensorBoard cell immediately before training. Leave its dashboard visible while
+running the training cell. It begins empty and updates as epochs finish.
 
-The training job exits before the viewer cell. This preserves its event files
-without starting a short-lived dashboard in a completed job. An interactive
-TensorBoard UI needs an active notebook session.
+For a **bundle GPU job**, open the deployed `taco_databricks.py` in a separate
+active notebook session with CPU compute. Install the notebook dependencies if
+the session is fresh (`%pip install tensorboard==2.21.0 Pillow`, followed by
+`dbutils.library.restartPython()` in a separate cell), then run only its final
+**TensorBoard viewer** cell. No PyTorch installation is needed just to view live logs. Its
+default log directory lists all runs; select the current experiment in the run
+selector. Alternatively, set `RUN_TO_VIEW` to the **Live TensorBoard and saved
+run:** path printed by the GPU job before training starts. The viewer does not
+train or require CUDA. Both sessions read the same volume.
+
+TensorBoard checks for new events every five seconds. Training and validation
+metrics arrive at epoch boundaries; nothing appears until epoch one finishes.
+Enable automatic reload in the TensorBoard UI, or use its refresh button. Keep
+the viewing notebook session active; the GPU job can end independently.
 
 - **Scalars / Time Series**: inspect losses, learning rates, precision, recall,
   and mAP by epoch.
 - **Images**: inspect training batches, class distributions, and prediction
   comparisons.
-- **Graphs**: inspect the model graph recorded by new training runs.
+- **Graphs**: available for local runs using the native logger.
 
-Older runs with only `results.csv` are converted when the viewer is opened.
-The conversion does not retrain, and repeated views reuse the same summary
-event file. Historical CSV runs have no recorded model graph.
+For older runs with only `results.csv`, call `prepare_tensorboard_logs(run_dir)`
+once or use `display_tensorboard(run_dir)` without `live=True`. Conversion does
+not retrain; repeated views reuse the same summary event file. Historical CSV
+runs have no recorded model graph.
 
 For multiple runs in one notebook, prepare any older run directories first,
 then start TensorBoard on the parent directory:
@@ -109,6 +126,48 @@ older saved run, for example:
 Open `http://localhost:6006`. Databricks volume paths are remote; download
 their event files into a local report directory to visualize them locally.
 
+For the completed YOLO26 Medium run, its event files are also downloaded to
+`reports/taco_yolo/databricks_yolo26m_2epochs`. To reopen that dashboard in a
+normal browser tab, start this command in a terminal and leave it running:
+
+```powershell
+.\.venv\Scripts\python.exe -B -m tensorboard.main --logdir reports/taco_yolo/databricks_yolo26m_2epochs --host 127.0.0.1 --port 6006 --load_fast=false --reload_interval 5
+```
+
+Open `http://localhost:6006` in a new browser tab. The local viewer reads the
+downloaded files; viewing new cloud epochs locally requires copying their new
+event files while training runs. The active Databricks viewer reads the volume
+directly for live updates.
+
+## Validation and final testing
+
+Training updates weights on 1,126 images. Validation uses 197 separate images
+to select checkpoints and compare settings. Final testing evaluates the chosen
+checkpoint on the remaining 177 held-out images without changing its weights.
+
+- `mAP50` averages detection precision-recall scores across represented classes
+  with the correct class and at least 50% intersection-over-union box overlap.
+- `mAP50-95` averages the same measure at overlap thresholds from 50% to 95% in
+  5-point steps. It requires more precise localization and is usually lower.
+
+These are detection-quality scores, not the percentage of images classified
+correctly. The two-epoch model's validation mAP50 of 2.75% and mAP50-95 of 1.64%
+are low scores from a short training run.
+
+To test a saved experiment in Databricks, run only the **Held-out TACO test**
+cell in `taco_databricks.py`, selecting `RUN_TO_TEST`. It calls
+`test_saved_run()` using the saved TACO-trained `best.pt`, stages evaluation
+locally, and saves reports and plots under that experiment's `test/` directory.
+It also logs `test/*` metrics to TensorBoard. Final test data stays separate
+from validation used for tuning; test scores should not select training settings.
+
+The saved two-epoch YOLO26 Medium checkpoint was tested on all 177 held-out
+images using NVIDIA A10G, without retraining: test mAP50 **2.37%**, test
+mAP50-95 **1.56%**. The test split contains 38 represented classes out of the
+model's 60; absent classes are unscored in the report. Test metrics, per-class
+scores, and a confusion-matrix plot are also downloaded into
+`reports/taco_yolo/databricks_yolo26m_2epochs/test`.
+
 ## Data preparation
 
 `prepare()` reads COCO annotations, keeps each source batch in a single split,
@@ -129,7 +188,9 @@ Edit `DEFAULT_EXPERIMENT` in `taco_yolo.py`, then run:
 .\.venv\Scripts\python.exe -B taco_yolo.py
 ```
 
-The default local experiment uses 60 epochs and automatic CUDA/CPU selection.
+The default local experiment uses pretrained `yolo26m.pt` for 2 epochs at 640
+pixels, batch 8, the full training split, no early stopping, and automatic
+CUDA/CPU selection.
 The CLI also provides `prepare`, `train`, `evaluate`, and `predict`; use
 `python taco_yolo.py <command> --help` for their options.
 
@@ -141,12 +202,21 @@ Each experiment keeps:
 - `predictions/` with ground-truth/prediction comparisons.
 - `run_config.json` and `artifacts.json`.
 
-The completed Databricks smoke run is in
+The YOLO26 Medium Databricks experiment saves to
+`/Volumes/workspace/default/tacotrashdata/reports/taco_yolo/databricks_yolo26m_2epochs`.
+Additional runs receive numbered experiment directories.
+
+The verified YOLO26 Medium run completed 2 epochs on NVIDIA A10G with all 1,126
+training images, 640-pixel inputs, and batch 8. Validation on 197 images gave
+mAP50 2.75% and mAP50-95 1.64%; these are results from only two training epochs.
+Both epoch logs, checkpoints, validation reports, and prediction examples were
+saved. [Open the successful run](https://dbc-fd89e1b5-e4fc.cloud.databricks.com/jobs/701121890710253/runs/213741636457951?o=7474659242886734).
+
+The earlier YOLO11 Nano smoke run remains in
 `/Volumes/workspace/default/tacotrashdata/reports/taco_yolo/databricks_small_gpu`.
 It ran 2 epochs on NVIDIA A10G, using 113 training images and all 197 validation
 images. Validation mAP50 was 0.64% and mAP50-95 was 0.43%; this is a short
 pipeline demonstration. The test split is reserved for final scoring.
-Additional completed runs receive numbered experiment directories.
 
 ## Verify the code
 
@@ -159,4 +229,5 @@ References:
 - [TensorBoard in Databricks](https://docs.databricks.com/aws/en/machine-learning/train-model/tensorboard)
 - [Ultralytics TensorBoard integration](https://docs.ultralytics.com/integrations/tensorboard/)
 - [YOLO training arguments](https://docs.ultralytics.com/modes/train/)
+- [YOLO26 models](https://docs.ultralytics.com/models/yolo26/)
 - [TensorBoard documentation](https://www.tensorflow.org/tensorboard)

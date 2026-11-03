@@ -1,4 +1,4 @@
-"""Train, evaluate, and visualize a YOLO11 detector on the local TACO dataset.
+"""Train, evaluate, and visualize a YOLO26 detector on the local TACO dataset.
 
 See TACO_YOLO_GUIDE.md for setup, commands, and how to interpret the results.
 Run without arguments to execute DEFAULT_EXPERIMENT, or use the CLI subcommands.
@@ -39,13 +39,13 @@ class ExperimentConfig:
     source: Path | str = SOURCE
     prepared: Path | str = PREPARED
     project: Path | str = RUNS
-    weights: Path | str = "yolo11n.pt"  # Or a TACO-trained best.pt to fine-tune.
+    weights: Path | str = "yolo26m.pt"  # Or a TACO-trained best.pt to fine-tune.
     name: str = "taco"
-    epochs: int = 60
+    epochs: int = 2
     imgsz: int = 640
     batch: int = 8
     device: str = "auto"  # auto selects the first CUDA GPU, otherwise CPU.
-    patience: int = 20  # 0 disables early stopping.
+    patience: int = 0  # 0 disables early stopping.
     lr: float = 0.001
     fraction: float = 1.0
     freeze: int = 0
@@ -57,18 +57,19 @@ class ExperimentConfig:
     test_ratio: float = 0.15
     prediction_count: int = 8
     conf: float = 0.25
+    tensorboard_dir: Path | str | None = None  # Publish completed epochs here while training.
 
 
 # Edit this block, then run taco_yolo.py without command-line arguments.
 # Databricks users can edit the equivalent cell in taco_databricks.py.
 DEFAULT_EXPERIMENT = ExperimentConfig(
-    epochs=60,
+    epochs=2,
     imgsz=640,
     batch=8,
     device="auto",
-    patience=20,
+    patience=0,
     lr=0.001,
-    weights="yolo11n.pt",
+    weights="yolo26m.pt",
     name="taco",
     prediction_count=8,
     conf=0.25,
@@ -239,7 +240,7 @@ def load_yolo(weights, threads=4):
 
 
 def resolve_weights(value):
-    if value in ("yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt", "yolo11x.pt"):
+    if value in {f"yolo{version}{size}.pt" for version in ("11", "26") for size in "nsmlx"}:
         path = STORAGE / "data/yolo/weights" / value
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
@@ -257,6 +258,13 @@ def train(args):
     if not data.is_file():
         raise FileNotFoundError(f"Run prepare first. Missing dataset configuration: {data}")
     model = load_yolo(resolve_weights(args.weights), args.threads)
+    if getattr(args, "tensorboard_dir", None):
+        from ultralytics import settings
+
+        # Publish closed event files: Unity Catalog volumes do not support append.
+        # This replaces the native logger for this run, avoiding duplicate scalars.
+        settings.update({"tensorboard": False})
+        model.add_callback("on_fit_epoch_end", lambda trainer: publish_tensorboard_epoch(trainer, args.tensorboard_dir))
     model.train(data=str(data), epochs=args.epochs, imgsz=args.imgsz, batch=args.batch,
                 device=args.device, workers=args.workers, seed=args.seed, deterministic=True,
                 project=str(args.project), name=args.name, exist_ok=False, patience=args.patience,
@@ -312,6 +320,44 @@ def evaluate(args):
     print(json.dumps({k: v for k, v in report.items() if k != "per_class"}, indent=2), flush=True)
     print(f"Evaluation artifacts: {output}", flush=True)
     return output
+
+
+def test_saved_run(run_dir, imgsz=640, batch=8, device="auto", threads=4):
+    """Score a saved TACO checkpoint on held-out test data without retraining."""
+    run_dir = Path(run_dir).expanduser().resolve()
+    artifacts = json.loads((run_dir / "artifacts.json").read_text(encoding="utf-8"))
+    device = str(device)
+    if device == "auto":
+        import torch
+
+        device = "0" if torch.cuda.is_available() else "cpu"
+    target = run_dir / "test"
+    # Write plots locally, then copy completed files to the persistent volume.
+    with tempfile.TemporaryDirectory(prefix="taco_test_") as temporary:
+        output = Path(evaluate(argparse.Namespace(
+            data=Path(artifacts["data"]), weights=Path(artifacts["best_weights"]),
+            imgsz=imgsz, batch=batch, device=device, threads=threads,
+            split="test", project=Path(temporary), name="test")))
+        for path in output.rglob("*"):
+            if path.is_file():
+                saved = target / path.relative_to(output)
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, saved)
+        event_path = run_dir / "events.out.tfevents.test"
+        if not event_path.is_file():
+            from torch.utils.tensorboard import SummaryWriter
+
+            report = json.loads((output / "metrics.json").read_text(encoding="utf-8"))
+            log_dir = Path(temporary) / "tensorboard"
+            with SummaryWriter(str(log_dir)) as writer:
+                for key in ("precision", "recall", "mAP50", "mAP50_95"):
+                    writer.add_scalar(f"test/{key}", float(report[key]), 0)
+            # Publish only after close, preserving volume compatibility and ordering.
+            shutil.copyfile(next(log_dir.glob("events.out.tfevents.*")), event_path)
+    artifacts["test_dir"] = str(target)
+    write_json(run_dir / "artifacts.json", artifacts)
+    print(f"Test results: {target}", flush=True)
+    return target
 
 
 def intersection_over_union(a, b):
@@ -467,6 +513,53 @@ def run_experiment(config=None):
     return artifacts
 
 
+def _log_tensorboard_images(writer, run_dir, step=0):
+    import numpy as np
+
+    images = [run_dir / "labels.jpg", *sorted(run_dir.glob("train_batch*.jpg"))[:3],
+              *sorted((run_dir / "predictions").glob("*.jpg"))[:4]]
+    for path in images:
+        if path.is_file():
+            with Image.open(path) as image:
+                rgb = image.convert("RGB")
+                rgb.thumbnail((1280, 1280))
+                writer.add_image(f"data/{path.stem}", np.asarray(rgb), step, dataformats="HWC")
+
+
+def publish_tensorboard_epoch(trainer, output):
+    """Publish one closed, immutable event file per epoch for a live viewer."""
+    # final_eval validates the best checkpoint with training=False and increments
+    # trainer.epoch; it is a separate assessment, not another training epoch.
+    if not getattr(getattr(trainer, "validator", None), "training", True):
+        return None
+    from torch.utils.tensorboard import SummaryWriter
+
+    step = trainer.epoch + 1
+    name = f"events.out.tfevents.epoch{step:06d}"
+    target = Path(output) / name
+    # Ignore repeated callbacks for an epoch that has already been published.
+    if target.is_file():
+        return target
+    run_dir = Path(trainer.save_dir)
+    values = {**trainer.label_loss_items(trainer.tloss, prefix="train"), **trainer.metrics, **trainer.lr}
+    with tempfile.TemporaryDirectory(prefix="taco_tensorboard_") as temporary:
+        with SummaryWriter(temporary) as writer:
+            for tag, value in values.items():
+                value = float(value)
+                if math.isfinite(value):
+                    writer.add_scalar(tag, value, step)
+            if step == 1:
+                _log_tensorboard_images(writer, run_dir, step)
+        event_file = next(Path(temporary).glob("events.out.tfevents.*"))
+        local_event = run_dir / name
+        shutil.copyfile(event_file, local_event)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.resolve() != local_event.resolve():
+            shutil.copyfile(local_event, target)
+    print(f"TensorBoard: published epoch {step} to {target.parent}", flush=True)
+    return target
+
+
 def prepare_tensorboard_logs(run_dir):
     """Add data images and backfill older CSV-only runs without retraining."""
     run_dir = Path(run_dir).expanduser().resolve()
@@ -478,7 +571,6 @@ def prepare_tensorboard_logs(run_dir):
     if not native_events and not csv_path.is_file():
         raise FileNotFoundError(f"No TensorBoard events or results.csv in {run_dir}")
 
-    import numpy as np
     from torch.utils.tensorboard import SummaryWriter
 
     # Close the writer before copying: volume files do not support append/seek.
@@ -496,27 +588,24 @@ def prepare_tensorboard_logs(run_dir):
                                 continue
                             if math.isfinite(value):
                                 writer.add_scalar(tag, value, step)
-            images = [run_dir / "labels.jpg", *sorted(run_dir.glob("train_batch*.jpg"))[:3],
-                      *sorted((run_dir / "predictions").glob("*.jpg"))[:4]]
-            for path in images:
-                if path.is_file():
-                    with Image.open(path) as image:
-                        rgb = image.convert("RGB")
-                        rgb.thumbnail((1280, 1280))
-                        writer.add_image(f"data/{path.stem}", np.asarray(rgb), 0, dataformats="HWC")
+            _log_tensorboard_images(writer, run_dir)
         event_file = next(Path(temporary).glob("events.out.tfevents.*"))
         shutil.copyfile(event_file, event_path)
     print(f"TensorBoard logs: {run_dir}", flush=True)
     return run_dir
 
 
-def display_tensorboard(run_dir):
+def display_tensorboard(run_dir, live=False):
     """Open TensorBoard inline in an active Databricks or Jupyter notebook."""
     from shlex import quote
     from tensorboard import notebook
 
-    log_dir = prepare_tensorboard_logs(run_dir)
-    return notebook.start(f"--logdir {quote(str(log_dir))} --port 6006 --load_fast=false")
+    if live:
+        log_dir = Path(run_dir).expanduser().resolve()
+        log_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        log_dir = prepare_tensorboard_logs(run_dir)
+    return notebook.start(f"--logdir {quote(str(log_dir))} --load_fast=false --reload_interval 5")
 
 
 def display_results(run_dir, table_display=None):
@@ -561,17 +650,17 @@ def main(argv=None):
     for name in ("train", "evaluate", "predict"):
         sub = commands.add_parser(name)
         sub.add_argument("--data", type=Path, default=PREPARED / "dataset.yaml")
-        sub.add_argument("--weights", default="yolo11n.pt" if name == "train" else str(RUNS / "taco/weights/best.pt"))
+        sub.add_argument("--weights", default=DEFAULT_EXPERIMENT.weights if name == "train" else str(RUNS / "taco/weights/best.pt"))
         sub.add_argument("--imgsz", type=int, default=640)
         sub.add_argument("--device", default="cpu", help="cpu, or 0 for the first CUDA GPU")
         sub.add_argument("--threads", type=int, default=4)
         if name == "train":
             sub.add_argument("--project", type=Path, default=RUNS)
-            sub.add_argument("--epochs", type=int, default=60)
+            sub.add_argument("--epochs", type=int, default=DEFAULT_EXPERIMENT.epochs)
             sub.add_argument("--batch", type=int, default=8)
             sub.add_argument("--workers", type=int, default=0)
             sub.add_argument("--seed", type=int, default=42)
-            sub.add_argument("--patience", type=int, default=15)
+            sub.add_argument("--patience", type=int, default=DEFAULT_EXPERIMENT.patience)
             sub.add_argument("--fraction", type=float, default=1.0)
             sub.add_argument("--freeze", type=int, default=0, help="Number of initial layers to freeze")
             sub.add_argument("--lr", type=float, default=0.001)

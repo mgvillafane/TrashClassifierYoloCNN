@@ -151,6 +151,16 @@ class TacoYoloTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'TACO-trained'):
             detector.check_class_names({0: 'person'}, manifest)
 
+    def test_official_model_names_use_weights_storage_and_custom_paths_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(detector, 'STORAGE', root):
+                for name in ('yolo26m.pt', 'yolo11n.pt'):
+                    self.assertEqual(detector.resolve_weights(name), root / 'data/yolo/weights' / name)
+                custom = root / 'custom/checkpoint.pt'
+                self.assertEqual(detector.resolve_weights(custom), custom.resolve())
+            self.assertTrue((root / 'data/yolo/weights').is_dir())
+
     def test_running_without_arguments_uses_editable_experiment(self):
         with patch.object(detector, 'run_experiment', return_value={'run_dir': 'saved'}) as run:
             self.assertEqual(detector.main([]), {'run_dir': 'saved'})
@@ -240,6 +250,67 @@ class TacoYoloTests(unittest.TestCase):
             self.assertEqual(len(displayed), 4)
             self.assertIn(str(predictions / 'image_000001.jpg'), displayed)
 
+    def test_saved_run_scores_test_checkpoint_and_preserves_reports_after_staging_cleanup(self):
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+        import torch
+        from torch.utils.tensorboard import SummaryWriter
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = root / 'saved_run'
+            artifacts = {
+                'run_dir': str(run), 'best_weights': str(run / 'weights/best.pt'),
+                'data': str(root / 'prepared/dataset.yaml'),
+                'evaluation_dir': str(run / 'validation'),
+                'predictions_dir': str(run / 'predictions'),
+                'tensorboard_dir': str(run)}
+            detector.write_json(run / 'artifacts.json', artifacts)
+            with SummaryWriter(str(run)) as writer:
+                writer.add_scalar('train/box_loss', 1.5, 1)
+            next(run.glob('events.out.tfevents.*')).rename(run / 'events.out.tfevents.taco')
+            events = EventAccumulator(str(run)).Reload()
+
+            def evaluate_test(args):
+                self.assertEqual(args.split, 'test')
+                self.assertEqual(args.weights, Path(artifacts['best_weights']))
+                self.assertEqual(args.data, Path(artifacts['data']))
+                self.assertEqual((args.imgsz, args.batch, args.device, args.threads), (640, 8, '0', 4))
+                output = args.project / 'test'
+                detector.write_json(output / 'metrics.json', {
+                    'split': 'test', 'precision': .75, 'recall': .5, 'mAP50': .2, 'mAP50_95': .1})
+                (output / 'per_class.csv').write_text('class,objects,AP50\nBottle,2,0.2\n')
+                (output / 'plots').mkdir()
+                (output / 'plots/confusion.png').write_bytes(b'saved plot')
+                return output
+
+            with patch.object(torch.cuda, 'is_available', return_value=True), \
+                    patch.object(detector, 'evaluate', side_effect=evaluate_test) as evaluate, \
+                    patch.object(detector, 'train') as train, \
+                    patch.object(detector, 'prepare') as prepare:
+                target = detector.test_saved_run(run)
+                event_path = run / 'events.out.tfevents.test'
+                original = event_path.read_bytes()
+                detector.test_saved_run(run)
+                self.assertEqual(event_path.read_bytes(), original)
+            train.assert_not_called()
+            prepare.assert_not_called()
+            self.assertEqual(evaluate.call_count, 2)
+            self.assertTrue(all(not call.args[0].project.exists() for call in evaluate.call_args_list))
+            self.assertEqual(target, run / 'test')
+            self.assertEqual(json.loads((target / 'metrics.json').read_text())['split'], 'test')
+            self.assertIn('Bottle,2,0.2', (target / 'per_class.csv').read_text())
+            self.assertEqual((target / 'plots/confusion.png').read_bytes(), b'saved plot')
+            self.assertEqual(json.loads((run / 'artifacts.json').read_text()), {
+                **artifacts, 'test_dir': str(target)})
+            events.Reload()
+            expected = {'test/precision': .75, 'test/recall': .5, 'test/mAP50': .2, 'test/mAP50_95': .1}
+            self.assertEqual(set(events.Tags()['scalars']), {'train/box_loss', *expected})
+            self.assertEqual([item.value for item in events.Scalars('train/box_loss')], [1.5])
+            for tag, value in expected.items():
+                scalars = events.Scalars(tag)
+                self.assertEqual([item.step for item in scalars], [0])
+                self.assertAlmostEqual(scalars[0].value, value)
+
     def test_tensorboard_backfills_csv_and_images_without_retraining_or_duplicate_files(self):
         from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
@@ -283,6 +354,114 @@ class TacoYoloTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(FileNotFoundError, 'No TensorBoard events or results.csv'):
                 detector.prepare_tensorboard_logs(directory)
+
+    def test_live_tensorboard_publishes_epochs_and_final_images_to_an_open_reader(self):
+        from shutil import copyfile
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+        with tempfile.TemporaryDirectory() as directory:
+            local, output = Path(directory) / 'local', Path(directory) / 'published'
+            local.mkdir()
+            Image.new('RGB', (20, 10), 'red').save(local / 'train_batch0.jpg')
+            trainer = SimpleNamespace(
+                save_dir=local, epoch=0, tloss=1.5,
+                label_loss_items=lambda losses, prefix: {f'{prefix}/box_loss': losses},
+                metrics={'metrics/mAP50(B)': .1}, lr={'lr/pg0': .001})
+
+            first = detector.publish_tensorboard_epoch(trainer, output)
+            self.assertTrue(first.is_file())
+            self.assertEqual(first.name, 'events.out.tfevents.epoch000001')
+            events = EventAccumulator(str(output)).Reload()
+            self.assertEqual([event.step for event in events.Scalars('train/box_loss')], [1])
+            self.assertIn('data/train_batch0', events.Tags()['images'])
+
+            trainer.epoch, trainer.tloss = 1, .9
+            trainer.metrics = {'metrics/mAP50(B)': .2}
+            detector.publish_tensorboard_epoch(trainer, output)
+            events.Reload()
+            for tag in ('train/box_loss', 'metrics/mAP50(B)', 'lr/pg0'):
+                self.assertEqual([event.step for event in events.Scalars(tag)], [1, 2])
+            self.assertAlmostEqual(events.Scalars('train/box_loss')[-1].value, .9)
+            self.assertAlmostEqual(events.Scalars('metrics/mAP50(B)')[-1].value, .2)
+            published = {path.name: path.read_bytes() for path in output.glob('events.out.tfevents.*')}
+
+            # Ignore repeated callbacks for an already published training epoch.
+            trainer.tloss = 999
+            trainer.metrics = {'metrics/mAP50(B)': 999}
+            detector.publish_tensorboard_epoch(trainer, output)
+            self.assertEqual(
+                {path.name: path.read_bytes() for path in output.glob('events.out.tfevents.*')}, published)
+            events.Reload()
+            self.assertEqual([event.step for event in events.Scalars('train/box_loss')], [1, 2])
+            self.assertAlmostEqual(events.Scalars('train/box_loss')[-1].value, .9)
+
+            # Real final_eval increments epoch while validating the best checkpoint.
+            # It must not create a phantom third training epoch (also after early stop).
+            trainer.epoch = 2
+            trainer.validator = SimpleNamespace(training=False)
+            self.assertIsNone(detector.publish_tensorboard_epoch(trainer, output))
+            self.assertEqual(
+                {path.name: path.read_bytes() for path in output.glob('events.out.tfevents.*')}, published)
+            self.assertFalse((local / 'events.out.tfevents.epoch000003').exists())
+            events.Reload()
+            self.assertEqual([event.step for event in events.Scalars('train/box_loss')], [1, 2])
+
+            # The same reader must discover the final summary after the live epoch files.
+            (local / 'predictions').mkdir()
+            Image.new('RGB', (20, 10), 'blue').save(local / 'predictions/image_000001.jpg')
+            (local / 'results.csv').write_text('epoch,train/box_loss\n1,999\n2,999\n')
+            detector.prepare_tensorboard_logs(local)
+            copyfile(local / 'events.out.tfevents.taco', output / 'events.out.tfevents.taco')
+            events.Reload()
+            self.assertIn('data/image_000001', events.Tags()['images'])
+            self.assertEqual([event.step for event in events.Scalars('train/box_loss')], [1, 2])
+            self.assertAlmostEqual(events.Scalars('train/box_loss')[-1].value, .9)
+
+    def test_live_tensorboard_viewer_starts_on_an_empty_directory(self):
+        from importlib import import_module
+
+        # Force the real module: patching TensorBoard's initial lazy proxy misses later imports.
+        notebook = import_module('tensorboard.notebook')
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'pending_run'
+            with patch.object(notebook, 'start', return_value='viewer') as start, \
+                    patch.object(detector, 'prepare_tensorboard_logs') as prepare:
+                self.assertEqual(detector.display_tensorboard(output, live=True), 'viewer')
+            prepare.assert_not_called()
+            self.assertTrue(output.is_dir())
+            command = start.call_args.args[0]
+            self.assertIn(str(output.resolve()), command)
+            self.assertIn('--reload_interval 5', command)
+
+    def test_live_training_publishes_from_the_registered_epoch_callback(self):
+        from dataclasses import asdict
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / 'dataset.yaml'
+            data.write_text('names: [Bottle]\n')
+            arguments = asdict(detector.ExperimentConfig(
+                project=root / 'local', weights=root / 'initial.pt',
+                tensorboard_dir=root / 'published', epochs=2, device='cpu'))
+            arguments['data'] = data
+            args = SimpleNamespace(**arguments)
+            trainer = SimpleNamespace(save_dir=root / 'local/taco')
+            callbacks, settings = {}, {'tensorboard': True}
+
+            def train_model(**kwargs):
+                self.assertFalse(settings['tensorboard'])
+                callbacks['on_fit_epoch_end'](trainer)
+                publish.assert_called_once_with(trainer, args.tensorboard_dir)
+
+            model = SimpleNamespace(
+                trainer=trainer, train=train_model,
+                add_callback=lambda event, callback: callbacks.update({event: callback}))
+            with patch.dict('sys.modules', {'ultralytics': SimpleNamespace(settings=settings)}), \
+                    patch.object(detector, 'load_yolo', return_value=model), \
+                    patch.object(detector, 'publish_tensorboard_epoch') as publish:
+                best = detector.train(args)
+            self.assertEqual(best, trainer.save_dir / 'weights/best.pt')
 
 
 if __name__ == '__main__':
