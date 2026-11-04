@@ -10,7 +10,9 @@
 # MAGIC run a resource**, then select `taco_small_gpu`.
 # MAGIC The editor's Run File as Workflow command uses the selected compute; it does
 # MAGIC not apply the GPU settings from the bundle job.
-# MAGIC This run uses YOLO26 Medium, 2 epochs, 640-pixel inputs, and all training images.
+# MAGIC This run uses YOLO26 Medium, up to 40 epochs, 640-pixel inputs, and all training images.
+# MAGIC Early stopping waits 8 epochs without validation improvement. Best and last
+# MAGIC checkpoints are copied to the volume after each epoch and again at training end.
 # MAGIC Labels are cardboard, glass, metal, paper, plastic, and trash. The explicit
 # MAGIC mapping is a project approximation; review its mixed-material and unknown-litter policy.
 # MAGIC Run the cells in order. Edit the configuration cell to change the experiment.
@@ -78,19 +80,23 @@ from ultralytics.utils.files import increment_path
 settings.update({"mlflow": False, "tensorboard": True})
 
 LOCAL_RUN_ROOT = tempfile.TemporaryDirectory(prefix="taco_yolo_")
-SAVED_RUN_DIR = increment_path(TACO_ROOT / "reports/taco_yolo/databricks_trashnet_yolo26m_2epochs", mkdir=True)
+dbutils.widgets.text("run_name", "databricks_trashnet_yolo26m_40epochs")
+RUN_NAME = dbutils.widgets.get("run_name")
+if not RUN_NAME or Path(RUN_NAME).name != RUN_NAME:
+    raise ValueError("run_name must be a single directory name")
+SAVED_RUN_DIR = increment_path(TACO_ROOT / "reports/taco_yolo" / RUN_NAME, mkdir=True)
 CONFIG = ExperimentConfig(
     source=TACO_ROOT / "taco",
     prepared=TACO_ROOT / "yolo/taco_trashnet",
     label_scheme="trashnet",
     project=Path(LOCAL_RUN_ROOT.name),
-    name="databricks_trashnet_yolo26m_2epochs",
+    name=RUN_NAME,
     weights=TACO_ROOT / "yolo/weights/yolo26m.pt",  # Reuse the uploaded pretrained weights.
-    epochs=2,
+    epochs=40,
     imgsz=640,
     batch=8,
     device="0",  # Require the first CUDA GPU.
-    patience=0,  # Run both epochs.
+    patience=8,  # Stop after 8 consecutive epochs without improved validation fitness.
     lr=0.001,
     fraction=1.0,  # Use every image in the training split; keep validation/test held out.
     freeze=0,
@@ -171,7 +177,7 @@ dbutils.widgets.text("code_dir", str(Path.cwd()))
 sys.path.insert(0, dbutils.widgets.get("code_dir"))
 from taco_yolo import test_saved_run
 
-RUN_TO_TEST = Path("/Volumes/workspace/default/tacotrashdata/reports/taco_yolo/databricks_trashnet_yolo26m_2epochs")
+RUN_TO_TEST = Path("/Volumes/workspace/default/tacotrashdata/reports/taco_yolo/databricks_trashnet_yolo26m_40epochs")
 TEST_DIR = test_saved_run(RUN_TO_TEST)
 TEST_METRICS = json.loads((TEST_DIR / "metrics.json").read_text())
 print("Held-out test metrics (0 to 1):", {

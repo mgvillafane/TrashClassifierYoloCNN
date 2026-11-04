@@ -443,7 +443,7 @@ class TacoYoloTests(unittest.TestCase):
             data.write_text('names: [Bottle]\n')
             arguments = asdict(detector.ExperimentConfig(
                 project=root / 'local', weights=root / 'initial.pt',
-                tensorboard_dir=root / 'published', epochs=2, device='cpu'))
+                tensorboard_dir=root / 'published', epochs=40, patience=8, device='cpu'))
             arguments['data'] = data
             args = SimpleNamespace(**arguments)
             trainer = SimpleNamespace(save_dir=root / 'local/taco')
@@ -451,17 +451,54 @@ class TacoYoloTests(unittest.TestCase):
 
             def train_model(**kwargs):
                 self.assertFalse(settings['tensorboard'])
+                self.assertEqual(kwargs['epochs'], 40)
+                self.assertEqual(kwargs['patience'], 8)
+                self.assertTrue(kwargs['save'])
                 callbacks['on_fit_epoch_end'](trainer)
                 publish.assert_called_once_with(trainer, args.tensorboard_dir)
+                callbacks['on_model_save'](trainer)
+                checkpoints.assert_called_with(trainer, args.tensorboard_dir)
+                callbacks['on_train_end'](trainer)
+                checkpoints.assert_called_with(trainer, args.tensorboard_dir, finished=True)
 
             model = SimpleNamespace(
                 trainer=trainer, train=train_model,
                 add_callback=lambda event, callback: callbacks.update({event: callback}))
             with patch.dict('sys.modules', {'ultralytics': SimpleNamespace(settings=settings)}), \
                     patch.object(detector, 'load_yolo', return_value=model), \
-                    patch.object(detector, 'publish_tensorboard_epoch') as publish:
+                    patch.object(detector, 'publish_tensorboard_epoch') as publish, \
+                    patch.object(detector, 'publish_training_checkpoints') as checkpoints:
                 best = detector.train(args)
             self.assertEqual(best, trainer.save_dir / 'weights/best.pt')
+
+    def test_checkpoints_are_persisted_each_epoch_and_refreshed_after_finalization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run, output = root / 'run', root / 'volume'
+            (run / 'weights').mkdir(parents=True)
+            for name in ('best', 'last'):
+                (run / f'weights/{name}.pt').write_bytes(f'{name} checkpoint epoch one'.encode())
+            (run / 'results.csv').write_text('epoch,metrics/mAP50(B)\n1,0.1\n')
+            trainer = SimpleNamespace(save_dir=run, epoch=0, epochs=40, args=SimpleNamespace(patience=8))
+            saved = detector.publish_training_checkpoints(trainer, output)
+            self.assertEqual(set(saved), {'best', 'last'})
+            original_best = (output / 'weights/best.pt').stat().st_mtime_ns
+            trainer.epoch = 1
+            (run / 'results.csv').write_text('epoch,metrics/mAP50(B)\n1,0.1\n2,0.09\n')
+            (run / 'weights/last.pt').write_bytes(b'last checkpoint epoch two')
+            detector.publish_training_checkpoints(trainer, output)
+            self.assertEqual((output / 'weights/best.pt').stat().st_mtime_ns, original_best)
+            self.assertEqual((output / 'weights/last.pt').read_bytes(), b'last checkpoint epoch two')
+            # Finalization strips optimizer state and must refresh the published weights.
+            (run / 'weights/best.pt').write_bytes(b'final best')
+            (run / 'weights/last.pt').write_bytes(b'final last')
+            detector.publish_training_checkpoints(trainer, output, finished=True)
+            status = json.loads((output / 'training_status.json').read_text())
+            self.assertEqual(status['epochs_completed'], 2)
+            self.assertTrue(status['training_finished'])
+            self.assertEqual(status['early_stopping_patience'], 8)
+            self.assertEqual((output / 'weights/best.pt').read_bytes(), b'final best')
+            self.assertEqual((output / 'weights/last.pt').read_bytes(), b'final last')
 
 
 if __name__ == '__main__':

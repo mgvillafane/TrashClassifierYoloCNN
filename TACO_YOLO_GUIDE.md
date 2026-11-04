@@ -12,6 +12,7 @@ remain unchanged.
 - `taco_trashnet_mapping.json`: explicit mapping for all 60 original categories and policy notes.
 - `taco_label_preview.py`: verify every relabeled box and create before/after images.
 - `sync_taco_databricks.py`: upload prepared labels/images to the UC volume and deploy without training.
+- `watch_taco_training.py`: mirror cloud epoch logs and open a live TensorBoard browser tab.
 - `taco_databricks.py`: the Databricks GPU experiment and TensorBoard viewer.
 - `databricks.yml`: the `taco_small_gpu` job on one serverless A10 GPU.
 - `requirements-yolo.txt`: dependencies for local training and visualization.
@@ -51,14 +52,22 @@ databricks bundle run taco_small_gpu -t dev
 ```
 
 Edit `CONFIG` in `taco_databricks.py` to change the experiment. Its default
-uses YOLO26 Medium for 2 epochs, 640-pixel images, batch 8, the full 1,126-image
-training split (`fraction=1.0`), and two prediction examples. Early stopping is
-disabled (`patience=0`) so both epochs run. `device="0"` requires a GPU.
+uses YOLO26 Medium for up to 40 epochs, 640-pixel images, batch 8, the full 1,126-image
+training split (`fraction=1.0`), and two prediction examples. Early stopping uses
+`patience=8`: stop after eight consecutive epochs without improved validation
+fitness. `device="0"` requires a GPU. The job timeout is two hours.
 It explicitly selects `label_scheme="trashnet"` and `yolo/taco_trashnet`.
 Start from pretrained `yolo26m.pt`; the old 60-class `best.pt` is incompatible
 with six-class evaluation. The `taco_root` bundle variable/notebook widget
 selects the UC volume.
 Increase `epochs` for a longer experiment; validation and test images stay held out.
+`run_name` is a notebook widget that can select a unique experiment folder.
+`best.pt` and `last.pt` are saved explicitly and copied into the volume after
+each completed epoch. An additional copy at training end preserves finalized
+weights. `training_status.json`, `results.csv`, and closed TensorBoard event
+files are also published while training runs, so an interruption does not erase
+completed checkpoints. `best.pt` is the checkpoint selected by validation;
+`last.pt` holds the last completed training epoch.
 
 The notebook uses the headless Ultralytics package for compatibility with the
 server environment. It stages outputs in a writable temporary directory because
@@ -149,6 +158,19 @@ Open `http://localhost:6006` in a new browser tab. The local viewer reads the
 downloaded files; viewing new cloud epochs locally requires copying their new
 event files while training runs. The active Databricks viewer reads the volume
 directly for live updates.
+
+To open a separate local browser tab that automatically mirrors a live cloud
+run, replace `RUN_ID` and `RUN_NAME` with the launched job's values:
+
+```powershell
+.\.venv\Scripts\python.exe -B watch_taco_training.py --run-id RUN_ID --remote-run /Volumes/workspace/default/tacotrashdata/reports/taco_yolo/RUN_NAME --local-dir reports/taco_yolo/RUN_NAME --open-browser --background
+```
+
+The hidden helper checks Databricks every ten seconds and copies new immutable
+epoch events. TensorBoard reloads every five seconds. It chooses a free port
+starting at 6006, records the URL in `live_viewer.json`, and keeps the browser
+dashboard available after training finishes. `watcher.log` records sync errors;
+`databricks_run.json` and `training_status.json` show cloud and training status.
 
 ## Validation and final testing
 
@@ -271,7 +293,7 @@ Each experiment keeps:
 - `run_config.json` and `artifacts.json`.
 
 The YOLO26 Medium Databricks experiment saves to
-`/Volumes/workspace/default/tacotrashdata/reports/taco_yolo/databricks_trashnet_yolo26m_2epochs`.
+`/Volumes/workspace/default/tacotrashdata/reports/taco_yolo/databricks_trashnet_yolo26m_40epochs`.
 Additional runs receive numbered experiment directories.
 
 The historical 60-class YOLO26 Medium run completed 2 epochs on NVIDIA A10G with all 1,126

@@ -331,15 +331,18 @@ def train(args):
         # This replaces the native logger for this run, avoiding duplicate scalars.
         settings.update({"tensorboard": False})
         model.add_callback("on_fit_epoch_end", lambda trainer: publish_tensorboard_epoch(trainer, args.tensorboard_dir))
+        model.add_callback("on_model_save", lambda trainer: publish_training_checkpoints(trainer, args.tensorboard_dir))
+        model.add_callback("on_train_end", lambda trainer: publish_training_checkpoints(trainer, args.tensorboard_dir, finished=True))
     model.train(data=str(data), epochs=args.epochs, imgsz=args.imgsz, batch=args.batch,
                 device=args.device, workers=args.workers, seed=args.seed, deterministic=True,
                 project=str(args.project), name=args.name, exist_ok=False, patience=args.patience,
                 fraction=args.fraction, freeze=args.freeze, optimizer="AdamW", lr0=args.lr,
-                cos_lr=True, close_mosaic=min(10, args.epochs), plots=True, cache=False,
+                cos_lr=True, close_mosaic=min(10, args.epochs), plots=True, cache=False, save=True,
                 amp=args.device != "cpu")
     run_dir = Path(model.trainer.save_dir)
     best = run_dir / "weights/best.pt"
     write_json(run_dir / "experiment.json", {"training_data": str(data), "best_weights": str(best),
+               "last_weights": str(run_dir / "weights/last.pt"), "early_stopping_patience": args.patience,
                "epochs_requested": args.epochs, "training_fraction": args.fraction,
                "note": "Use validation to tune settings; reserve the test split for final evaluation."})
     print(f"Best weights: {best}", flush=True)
@@ -572,7 +575,8 @@ def run_experiment(config=None):
         split="val", image_id=None, source=None, count=config.prediction_count,
         conf=config.conf, output=predictions_dir))
     tensorboard_dir = prepare_tensorboard_logs(run_dir)
-    artifacts = {"run_dir": str(run_dir), "best_weights": str(best), "data": str(data),
+    artifacts = {"run_dir": str(run_dir), "best_weights": str(best),
+                 "last_weights": str(run_dir / "weights/last.pt"), "data": str(data),
                  "evaluation_dir": str(evaluation_dir), "predictions_dir": str(predictions_dir),
                  "tensorboard_dir": str(tensorboard_dir)}
     write_json(run_dir / "artifacts.json", artifacts)
@@ -591,6 +595,47 @@ def _log_tensorboard_images(writer, run_dir, step=0):
                 rgb = image.convert("RGB")
                 rgb.thumbnail((1280, 1280))
                 writer.add_image(f"data/{path.stem}", np.asarray(rgb), step, dataformats="HWC")
+
+
+def publish_training_checkpoints(trainer, output, finished=False):
+    """Persist closed checkpoint files before remote compute can disappear."""
+    output, run_dir = Path(output), Path(trainer.save_dir)
+    fingerprints = getattr(trainer, "_published_checkpoint_fingerprints", {})
+    saved = {}
+    for name in ("best", "last"):
+        source = Path(getattr(trainer, name, run_dir / f"weights/{name}.pt"))
+        if not source.is_file():
+            continue
+        target = output / "weights" / f"{name}.pt"
+        stat = source.stat()
+        fingerprint = (str(target.resolve()), stat.st_size, stat.st_mtime_ns)
+        if fingerprints.get(name) != fingerprint or not target.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if source.resolve() != target.resolve():
+                shutil.copyfile(source, target)
+            fingerprints[name] = fingerprint
+        saved[name] = str(target)
+    if not saved:
+        raise FileNotFoundError(f"No training checkpoints found in {run_dir / 'weights'}")
+    trainer._published_checkpoint_fingerprints = fingerprints
+    for name in ("results.csv", "args.yaml"):
+        source = run_dir / name
+        if source.is_file() and source.resolve() != (output / name).resolve():
+            shutil.copyfile(source, output / name)
+    # final_eval may increment trainer.epoch: the CSV counts completed epochs.
+    csv_path = run_dir / "results.csv"
+    if csv_path.is_file():
+        with csv_path.open(encoding="utf-8-sig", newline="") as stream:
+            epochs_completed = sum(1 for _ in csv.DictReader(stream))
+    else:
+        epochs_completed = trainer.epoch + 1
+    write_json(output / "training_status.json", {
+        "epochs_completed": epochs_completed, "epochs_requested": trainer.epochs,
+        "early_stopping_patience": trainer.args.patience,
+        "training_finished": finished, "checkpoints": saved,
+    })
+    print(f"Saved checkpoints to {output / 'weights'} (epoch {epochs_completed})", flush=True)
+    return saved
 
 
 def publish_tensorboard_epoch(trainer, output):
