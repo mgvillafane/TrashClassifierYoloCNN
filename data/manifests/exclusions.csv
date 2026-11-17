@@ -1,0 +1,33 @@
+dataset,exclude_reason,original_label,rows
+realwaste,organic; not a material class,Vegetation,436
+realwaste,organic; not a material class,Food Organics,411
+realwaste,textile; not a material class,Textile Trash,318
+sortwaste,composite beverage carton; material ambiguous,ecal,19227
+sortwaste,no objects in image,,4
+taco,material unknown,Unlabeled litter,517
+taco,crop short side < 32px,Cigarette,340
+taco,crop short side < 32px,Broken glass,50
+taco,composite beverage carton; consistent with SortWaste ECAL,Drink carton,45
+taco,crop short side < 32px,Plastic bottle cap,37
+taco,crop short side < 32px,Other plastic,35
+taco,textile; not a material class,Rope & strings,29
+taco,crop short side < 32px,Pop tab,27
+taco,crop short side < 32px,Plastic straw,23
+taco,crop short side < 32px,Metal bottle cap,14
+taco,organic; not a material class,Food waste,8
+taco,textile/mixed; not a material class,Shoe,7
+taco,crop short side < 32px,Drink can,5
+taco,crop short side < 32px,Plastic film,4
+taco,crop short side < 32px,Styrofoam piece,4
+taco,crop short side < 32px,Normal paper,2
+taco,crop short side < 32px,Other plastic wrapper,2
+taco,crop short side < 32px,Plastic lid,2
+taco,crop short side < 32px,Clear plastic bottle,1
+taco,crop short side < 32px,Other plastic bottle,1
+taco,crop short side < 32px,Plastic utensils,1
+taco,crop short side < 32px,Scrap metal,1
+taco,crop short side < 32px,Single-use carrier bag,1
+taco,crop short side < 32px,Toilet tube,1
+trashnet,identical image filed under different classes,glass,3
+trashnet,identical image filed under different classes,plastic,2
+trashnet,identical image filed under different classes,metal,1

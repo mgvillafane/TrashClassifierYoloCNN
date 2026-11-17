@@ -1,0 +1,5 @@
+dataset,cardboard,glass,metal,paper,plastic,trash
+realwaste,461,420,790,500,921,495
+trashnet,403,498,409,594,480,137
+sortwaste,2156,0,1437,0,64705,0
+taco,205,204,497,202,2095,424

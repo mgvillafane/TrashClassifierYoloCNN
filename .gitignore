@@ -1,7 +1,15 @@
 .venv/
 __pycache__/
 .ipynb_checkpoints/
-data/
+data/*
+# Small preprocessing summaries are committed; the full manifest (~35 MB) is rebuilt
+# locally with scripts/build_manifest.py.
+!data/manifests/
+data/manifests/*
+!data/manifests/summary.csv
+!data/manifests/class_table.csv
+!data/manifests/exclusions.csv
+!data/manifests/figures/
 reports/
 *.pyc
 
