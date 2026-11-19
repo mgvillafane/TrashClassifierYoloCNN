@@ -1,4 +1,4 @@
-"""Run classifier experiments C1–C3 on the shared Databricks classifier export."""
+"""Run classifier experiments C1–C4 on the shared Databricks classifier export."""
 
 import argparse
 import csv
@@ -14,13 +14,20 @@ from train_cnn import save_checkpoint, save_curves
 
 
 DATASETS = ('trashnet', 'realwaste', 'sortwaste')
-EXPERIMENTS = {'C1': ('trashnet',), 'C2': ('realwaste',), 'C3': ('trashnet', 'realwaste')}
+EXPERIMENTS = {
+    'C1': ('trashnet',),
+    'C2': ('realwaste',),
+    'C3': ('trashnet', 'realwaste'),
+    'C4': DATASETS,
+}
 DEFAULT_EPOCHS = {'cnn': 55, 'resnet-head': 20, 'resnet-layer4': 20}
 DEFAULT_DATA = Path('/Volumes/workspace/default/waste_data/processed/classifier')
 DEFAULT_WEIGHTS = Path('/Volumes/workspace/default/models/resnet_pretrained/torch_cache/'
                        'checkpoints/resnet18-f37072fd.pth')
 DEFAULT_OUTPUT = Path('/Volumes/workspace/default/models/classifier_experiments')
 DEFAULT_SORTWASTE_VAL_LIMIT = 500
+DEFAULT_C4_SAMPLES_PER_EPOCH = 6000
+DEFAULT_C4_SORTWASTE_VAL_PER_CLASS = 250
 
 
 def read_index(index_path, training_datasets):
@@ -86,6 +93,41 @@ def stratified_subset(rows, limit, seed):
     return sorted(selected, key=lambda row: str(row[0]))
 
 
+def balanced_subset(rows, per_class_limit, seed):
+    """Return up to the same fixed number of rows from every represented class."""
+    groups = {}
+    for row in rows:
+        groups.setdefault(row[1], []).append(row)
+    selected = []
+    for label, group in sorted(groups.items()):
+        count = min(per_class_limit, len(group))
+        selected.extend(random.Random(f'{seed}:{label}').sample(group, count))
+    return sorted(selected, key=lambda row: str(row[0]))
+
+
+def c4_balanced_sampling(train_rows):
+    """Give every class equal mass and split that mass equally across its datasets."""
+    cell_counts = {}
+    datasets_per_class = {label_id: 0 for label_id in range(len(CLASSES))}
+    for dataset, rows in train_rows.items():
+        for _, label_id in rows:
+            key = (dataset, label_id)
+            cell_counts[key] = cell_counts.get(key, 0) + 1
+    for _, label_id in cell_counts:
+        datasets_per_class[label_id] += 1
+    missing = [CLASSES[label_id] for label_id, count in datasets_per_class.items() if count == 0]
+    if missing:
+        raise ValueError(f'C4 training data is missing classes: {missing}')
+
+    flattened, weights = [], []
+    for dataset, rows in train_rows.items():
+        for row in rows:
+            label_id = row[1]
+            flattened.append(row)
+            weights.append(1 / (datasets_per_class[label_id] * cell_counts[dataset, label_id]))
+    return flattened, weights, cell_counts
+
+
 class IndexedImages:
     def __init__(self, root, rows, transform):
         self.root = root
@@ -103,15 +145,26 @@ class IndexedImages:
             return self.transform(image.convert(PREPROCESSING['color_mode'])), label_id
 
 
-def make_loader(args, rows, training=False):
+def make_loader(args, rows, training=False, sample_weights=None):
     import torch
-    from torch.utils.data import DataLoader
+    from torch.utils.data import DataLoader, WeightedRandomSampler
 
     augmentation = TRAINING_AUGMENTATION if training else None
     images = IndexedImages(args.data_root, rows, image_transform(PREPROCESSING, augmentation))
-    return DataLoader(images, batch_size=args.batch_size, shuffle=training,
+    sampler = None
+    if sample_weights is not None:
+        sampler = WeightedRandomSampler(
+            sample_weights,
+            num_samples=args.c4_samples_per_epoch,
+            replacement=True,
+            generator=torch.Generator().manual_seed(args.seed),
+        )
+    return DataLoader(images, batch_size=args.batch_size, shuffle=training and sampler is None,
+                      sampler=sampler,
                       num_workers=args.num_workers, pin_memory=args.device.type == 'cuda',
-                      generator=torch.Generator().manual_seed(args.seed))
+                      generator=torch.Generator().manual_seed(
+                          args.seed if sampler is None else args.seed + 1,
+                      ))
 
 
 def run_epoch(model, loader, criterion, device, optimizer=None):
@@ -157,9 +210,20 @@ def score(result):
     metrics = dict(loss=loss_sum / len(targets), count=len(targets),
                    accuracy=sum(a == b for a, b in zip(targets, predictions)) / len(targets),
                    macro_f1=float(f1[present].mean()), macro_f1_classes=[CLASSES[i] for i in present])
-    per_class = [dict(label_id=i, label=label, precision=float(precision[i]), recall=float(recall[i]),
+    per_class = [dict(label_id=i, label=label, accuracy=float(recall[i]),
+                      precision=float(precision[i]), recall=float(recall[i]),
                       f1=float(f1[i]), support=int(support[i])) for i, label in enumerate(CLASSES)]
     return metrics, per_class, confusion_matrix(targets, predictions, labels=labels)
+
+
+def dataset_average_metrics(metrics_by_dataset):
+    datasets = list(metrics_by_dataset)
+    return dict(
+        loss=sum(metrics_by_dataset[name]['loss'] for name in datasets) / len(datasets),
+        accuracy=sum(metrics_by_dataset[name]['accuracy'] for name in datasets) / len(datasets),
+        macro_f1=sum(metrics_by_dataset[name]['macro_f1'] for name in datasets) / len(datasets),
+        datasets=datasets,
+    )
 
 
 def write_csv(path, rows):
@@ -169,7 +233,7 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
-def save_validation(output, evaluations):
+def save_validation(output, evaluations, average_datasets=()):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -192,12 +256,17 @@ def save_validation(output, evaluations):
         fig.tight_layout()
         fig.savefig(output / f'{name}_confusion.png', dpi=150)
         plt.close(fig)
+    if average_datasets:
+        summaries['dataset_average'] = dataset_average_metrics(
+            {name: summaries[name] for name in average_datasets},
+        )
     (output / 'metrics.json').write_text(json.dumps(summaries, indent=2) + '\n')
     print(f'Validation reports saved to {output}', flush=True)
     return summaries
 
 
-def train_model(args, architecture, epochs, train_rows, validation_rows, output, data_config):
+def train_model(args, architecture, epochs, train_rows, training_rows, sample_weights,
+                selection_validation_rows, final_validation_rows, output, data_config):
     import numpy as np
     import torch
     from torch import nn
@@ -219,13 +288,22 @@ def train_model(args, architecture, epochs, train_rows, validation_rows, output,
     optimizer = torch.optim.AdamW(groups, lr=learning_rate, weight_decay=args.weight_decay)
     criterion = nn.CrossEntropyLoss()
 
-    train_loader = make_loader(args, [row for rows in train_rows.values() for row in rows], training=True)
-    selection = next(iter(train_rows)) if len(train_rows) == 1 else 'combined'
-    selection_rows = [row for dataset in train_rows for row in validation_rows[dataset]]
-    selection_loader = make_loader(args, selection_rows)
+    train_loader = make_loader(args, training_rows, training=True, sample_weights=sample_weights)
+    c4 = args.experiment == 'C4'
+    if c4:
+        selection = 'dataset_average'
+        selection_loaders = {
+            name: make_loader(args, selection_validation_rows[name]) for name in train_rows
+        }
+    else:
+        selection = next(iter(train_rows)) if len(train_rows) == 1 else 'combined'
+        selection_rows = [row for dataset in train_rows for row in selection_validation_rows[dataset]]
+        selection_loader = make_loader(args, selection_rows)
+    checkpoint_selection = ('dataset_average_macro_f1_then_dataset_average_accuracy' if c4
+                            else 'macro_f1_then_accuracy')
     config = dict(data_config, experiment=args.experiment, architecture=architecture, classes=list(CLASSES),
                   preprocessing=PREPROCESSING, training_augmentation=TRAINING_AUGMENTATION,
-                  selection_validation=selection, checkpoint_selection='macro_f1_then_accuracy',
+                  selection_validation=selection, checkpoint_selection=checkpoint_selection,
                   epochs=epochs, batch_size=args.batch_size, seed=args.seed,
                   device=str(args.device), num_workers=args.num_workers, torch_version=str(torch.__version__),
                   optimizer='AdamW', lr=learning_rate, weight_decay=args.weight_decay,
@@ -241,18 +319,36 @@ def train_model(args, architecture, epochs, train_rows, validation_rows, output,
         if finetune and epoch == warmup + 1:
             model.layer4.requires_grad_(True)
         train_metrics = score(run_epoch(model, train_loader, criterion, args.device, optimizer))[0]
-        val_metrics = score(run_epoch(model, selection_loader, criterion, args.device))[0]
-        history.append(dict(epoch=epoch, **{
+        val_metrics_by_dataset = None
+        if c4:
+            val_metrics_by_dataset = {
+                name: score(run_epoch(model, loader, criterion, args.device))[0]
+                for name, loader in selection_loaders.items()
+            }
+            val_metrics = dataset_average_metrics(val_metrics_by_dataset)
+        else:
+            val_metrics = score(run_epoch(model, selection_loader, criterion, args.device))[0]
+        history_row = dict(epoch=epoch, **{
             f'{split}_{key}': metrics[key]
             for split, metrics in [('train', train_metrics), ('val', val_metrics)]
             for key in ('loss', 'accuracy', 'macro_f1')
-        }))
+        })
+        if c4:
+            history_row.update({
+                f'val_{dataset}_{key}': metrics[key]
+                for dataset, metrics in val_metrics_by_dataset.items()
+                for key in ('loss', 'accuracy', 'macro_f1')
+            })
+        history.append(history_row)
         rank = (val_metrics['macro_f1'], val_metrics['accuracy'])
         if rank > best:
             best = rank
-            save_checkpoint(dict(model_state_dict={name: tensor.detach().cpu()
-                                                   for name, tensor in model.state_dict().items()},
-                                 epoch=epoch, val_metrics=val_metrics, config=config), output / 'best.pt')
+            checkpoint = dict(model_state_dict={name: tensor.detach().cpu()
+                                                for name, tensor in model.state_dict().items()},
+                              epoch=epoch, val_metrics=val_metrics, config=config)
+            if c4:
+                checkpoint['val_metrics_by_dataset'] = val_metrics_by_dataset
+            save_checkpoint(checkpoint, output / 'best.pt')
         write_csv(output / 'history.csv', history)
         print(f'Epoch {epoch}/{epochs} | train loss {train_metrics["loss"]:.4f} | '
               f'{selection} val macro F1 {rank[0]:.4f}, accuracy {rank[1]:.4f}', flush=True)
@@ -263,23 +359,39 @@ def train_model(args, architecture, epochs, train_rows, validation_rows, output,
     checkpoint = torch.load(output / 'best.pt', map_location='cpu', weights_only=True)
     model.load_state_dict(checkpoint['model_state_dict'])
     evaluations = {}
-    for name, rows in validation_rows.items():
+    for name, rows in final_validation_rows.items():
         print(f'{architecture}: validating on {name} ({len(rows)} images)...', flush=True)
         evaluations[name] = run_epoch(model, make_loader(args, rows), criterion, args.device)
         metrics = score(evaluations[name])[0]
         print(f'{architecture}: {name} validation complete | macro F1 '
               f'{metrics["macro_f1"]:.4f}, accuracy {metrics["accuracy"]:.4f}', flush=True)
     if selection == 'combined':
-        print(f'{architecture}: combining TrashNet and RealWaste validation results...', flush=True)
+        print(f'{architecture}: combining training-dataset validation results...', flush=True)
         parts = [evaluations[name] for name in train_rows]
         evaluations['combined'] = (sum(loss for loss, _, _ in parts),
                                    [label for _, targets, _ in parts for label in targets],
                                    [label for _, _, predictions in parts for label in predictions])
     print(f'{architecture}: generating validation reports...', flush=True)
-    summary = save_validation(output / 'validation', evaluations)
+    summary = save_validation(
+        output / 'validation', evaluations,
+        average_datasets=tuple(train_rows) if c4 else (),
+    )
+    if c4:
+        selection_metrics = dict(
+            epoch=checkpoint['epoch'],
+            dataset_average=checkpoint['val_metrics'],
+            by_dataset=checkpoint['val_metrics_by_dataset'],
+        )
+        (output / 'validation' / 'selection_metrics.json').write_text(
+            json.dumps(selection_metrics, indent=2) + '\n',
+        )
     result = dict(architecture=architecture, best_epoch=checkpoint['epoch'], selection_validation=selection,
                   **{f'{name}_{metric}': metrics[metric] for name, metrics in summary.items()
                      for metric in ('macro_f1', 'accuracy')}, checkpoint=str(output / 'best.pt'))
+    if c4:
+        for metric in ('macro_f1', 'accuracy'):
+            result[f'final_dataset_average_{metric}'] = result.pop(f'dataset_average_{metric}')
+            result[f'dataset_average_{metric}'] = checkpoint['val_metrics'][metric]
     print(f'{architecture}: finished. Best checkpoint came from epoch {checkpoint["epoch"]}.', flush=True)
     return result
 
@@ -288,7 +400,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('experiment', choices=EXPERIMENTS)
     parser.add_argument('--model', choices=(*MODELS, 'all'),
-                        help='Defaults to all for C1 and C3. For C2, pass the architecture selected in C1.')
+                        help='Defaults to all for C1, C3, and C4. For C2, pass the architecture selected in C1.')
     parser.add_argument('--data-root', type=Path, default=DEFAULT_DATA)
     parser.add_argument('--index', type=Path, help='Defaults to index.csv under --data-root.')
     parser.add_argument('--weights', type=Path, default=DEFAULT_WEIGHTS)
@@ -307,7 +419,12 @@ def main():
     parser.add_argument('--num-workers', type=int, default=2)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--sortwaste-val-limit', type=int, default=DEFAULT_SORTWASTE_VAL_LIMIT,
-                        help='Fixed proportional SortWaste validation subset size; use 0 for all images.')
+                        help='C1–C3 proportional SortWaste validation subset; use 0 for all images.')
+    parser.add_argument('--c4-samples-per-epoch', type=int, default=DEFAULT_C4_SAMPLES_PER_EPOCH,
+                        help='Weighted draws per C4 epoch (default: 6000; ignored by C1–C3).')
+    parser.add_argument('--c4-sortwaste-val-per-class', type=int,
+                        default=DEFAULT_C4_SORTWASTE_VAL_PER_CLASS,
+                        help='SortWaste selection-validation examples per available class in C4 (default: 250).')
     parser.add_argument('--dry-run', action='store_true', help='Validate the index and print counts without training.')
     args = parser.parse_args()
     if args.experiment == 'C2' and args.model in (None, 'all'):
@@ -322,28 +439,73 @@ def main():
         parser.error('workers, weight decay and warm-up must be nonnegative.')
     if args.sortwaste_val_limit < 0:
         parser.error('sortwaste-val-limit must be nonnegative.')
+    if args.c4_samples_per_epoch <= 0 or args.c4_sortwaste_val_per_class <= 0:
+        parser.error('C4 samples per epoch and SortWaste validation rows per class must be positive.')
     if 'resnet-layer4' in models and args.warmup_epochs >= epochs_by_model['resnet-layer4']:
         parser.error('ResNet layer4 warm-up must be shorter than the epoch budget.')
 
     index_path = args.index or args.data_root / 'index.csv'
     train_rows, validation_rows = read_index(index_path, EXPERIMENTS[args.experiment])
+    training_rows = [row for rows in train_rows.values() for row in rows]
+    sample_weights = None
+    c4_sampling = None
+    if args.experiment == 'C4':
+        training_rows, sample_weights, cell_counts = c4_balanced_sampling(train_rows)
+        c4_sampling = {
+            'strategy': 'weighted_random_sampler',
+            'replacement': True,
+            'samples_per_epoch': args.c4_samples_per_epoch,
+            'weight_formula': '1 / (datasets_containing_class * examples_in_dataset_and_class)',
+            'dataset_class_counts': {
+                dataset: {CLASSES[label_id]: cell_counts.get((dataset, label_id), 0)
+                          for label_id in range(len(CLASSES))}
+                for dataset in train_rows
+            },
+        }
     sortwaste_val_total = len(validation_rows['sortwaste'])
-    validation_rows['sortwaste'] = stratified_subset(
-        validation_rows['sortwaste'], args.sortwaste_val_limit, args.seed,
-    )
+    if args.experiment == 'C4':
+        selection_validation_rows = dict(validation_rows)
+        selection_validation_rows['sortwaste'] = balanced_subset(
+            validation_rows['sortwaste'], args.c4_sortwaste_val_per_class, args.seed,
+        )
+        final_validation_rows = validation_rows
+    else:
+        validation_rows['sortwaste'] = stratified_subset(
+            validation_rows['sortwaste'], args.sortwaste_val_limit, args.seed,
+        )
+        selection_validation_rows = validation_rows
+        final_validation_rows = validation_rows
     data_config = dict(data_root=str(args.data_root), index=str(index_path),
                        index_sha256=hashlib.sha256(index_path.read_bytes()).hexdigest(),
                        training_datasets=list(train_rows),
                        train_counts={name: len(rows) for name, rows in train_rows.items()},
-                       validation_counts={name: len(rows) for name, rows in validation_rows.items()},
+                       validation_counts={name: len(rows) for name, rows in final_validation_rows.items()},
+                       selection_validation_counts={
+                           name: len(rows) for name, rows in selection_validation_rows.items()
+                       },
+                       selection_validation_class_counts={
+                           name: {
+                               CLASSES[label_id]: sum(row[1] == label_id for row in rows)
+                               for label_id in range(len(CLASSES))
+                           }
+                           for name, rows in selection_validation_rows.items()
+                       },
                        sortwaste_validation_total=sortwaste_val_total,
-                       sortwaste_validation_subset_seed=args.seed)
+                       sortwaste_validation_subset_seed=args.seed,
+                       c4_sortwaste_validation_per_class=(
+                           args.c4_sortwaste_val_per_class if args.experiment == 'C4' else None
+                       ),
+                       training_sampling=c4_sampling or {'strategy': 'shuffle_without_replacement'})
     learning_rates = {'cnn': args.cnn_lr, 'resnet-head': args.head_lr,
                       'resnet-layer4': {'head': args.head_lr, 'layer4': args.backbone_lr}}
     selected_learning_rates = {model: learning_rates[model] for model in models}
     print(f'{args.experiment} | epochs {epochs_by_model} | learning rates {selected_learning_rates} | '
           f'train {data_config["train_counts"]} | '
-          f'validation {data_config["validation_counts"]}', flush=True)
+          f'selection validation {data_config["selection_validation_counts"]}', flush=True)
+    if c4_sampling:
+        print(f'C4 balanced sampling | {args.c4_samples_per_epoch} draws per epoch | '
+              f'{c4_sampling["weight_formula"]}', flush=True)
+        print(f'C4 final validation {data_config["validation_counts"]}', flush=True)
     if args.dry_run:
         return
     import torch
@@ -361,7 +523,9 @@ def main():
     total_models = len(epochs_by_model)
     for model_number, (model, epochs) in enumerate(epochs_by_model.items(), start=1):
         print(f'\nStarting model {model_number}/{total_models}: {model} ({epochs} epochs)', flush=True)
-        result = train_model(args, model, epochs, train_rows, validation_rows, output / model, data_config)
+        result = train_model(args, model, epochs, train_rows, training_rows, sample_weights,
+                             selection_validation_rows, final_validation_rows,
+                             output / model, data_config)
         selection = result['selection_validation']
         results.append(result)
         results.sort(key=lambda row: (row[f'{selection}_macro_f1'], row[f'{selection}_accuracy']), reverse=True)
