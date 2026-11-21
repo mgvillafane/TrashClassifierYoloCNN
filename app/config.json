@@ -1,0 +1,6 @@
+{
+  "model_path": "models/best.pt",
+  "confidence": 0.35,
+  "image_size": 640,
+  "device": "cpu"
+}

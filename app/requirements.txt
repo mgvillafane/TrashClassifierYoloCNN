@@ -1,0 +1,13 @@
+# Match the versions used to train the project's checkpoints.
+ultralytics==8.4.193
+torch==2.9.1
+torchvision==0.24.1
+pandas==3.0.5; sys_platform == "win32"
+pandas>=2.1; sys_platform != "win32"
+Pillow>=10
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+# Used by run.py to generate a local HTTPS certificate for phone camera access.
+cryptography>=44
+# API verification with python -m unittest discover -s app/tests.
+httpx>=0.28,<1

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#f5f6f2">
+    <meta name="description" content="A simple live view of your trash detection model.">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <title>SORT · Live trash detection</title>
+    <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+    <link rel="manifest" href="/static/manifest.webmanifest">
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <svg class="svg-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <symbol id="i-camera" viewBox="0 0 24 24"><path d="M8 5 6.5 8H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-9a2 2 0 0 0-2-2h-2.5L16 5Z"/><circle cx="12" cy="14" r="4"/></symbol>
+      <symbol id="i-flip" viewBox="0 0 24 24"><path d="M20 8a8.5 8.5 0 0 0-14-3L3 8m0-5v5h5M4 16a8.5 8.5 0 0 0 14 3l3-3m0 5v-5h-5"/></symbol>
+      <symbol id="i-photo" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="3"/></symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+      <symbol id="i-leaf" viewBox="0 0 24 24"><path d="M20 3C9 2 3 6 4 13c.8 5.7 8 7.4 12 3 3-3.3 4-8 4-13Z"/><path d="M4 21c1-6 4-10 10-13"/></symbol>
+    </svg>
+    <div class="app-shell">
+      <header class="header">
+        <a class="brand" href="/" aria-label="SORT home"><span class="brand-icon"><svg><use href="#i-leaf"/></svg></span><span>SORT<span class="brand-period">.</span></span></a>
+        <span class="header-caption">A clearer kind of sorting</span>
+      </header>
+
+      <main>
+        <section class="intro" aria-labelledby="page-title">
+          <p class="eyebrow">LIVE TRASH DETECTION</p>
+          <h1 id="page-title">See it. Know it.</h1>
+          <p class="intro-copy">Point your camera at an object.<br>Your model takes it from there.</p>
+        </section>
+
+        <div class="workspace">
+          <section class="scanner" aria-label="Camera and image scanner">
+            <div class="viewfinder" id="viewfinder">
+              <video id="camera" playsinline muted hidden aria-label="Live camera feed"></video>
+              <img id="photo-preview" hidden alt="Selected photo for trash detection">
+              <canvas id="overlay" aria-hidden="true"></canvas>
+              <div class="viewfinder-top"><span class="viewfinder-label">VIEWFINDER</span><span class="live-badge" id="live-badge" hidden><span></span> LIVE</span></div>
+              <div class="viewfinder-idle" id="viewfinder-idle">
+                <div class="camera-glyph"><svg><use href="#i-camera"/></svg></div>
+                <p>A fresh perspective.</p>
+                <span>Start your camera or choose a photo.</span>
+              </div>
+              <div class="frame-corner top-left"></div><div class="frame-corner top-right"></div><div class="frame-corner bottom-left"></div><div class="frame-corner bottom-right"></div>
+              <div class="viewfinder-bottom"><span id="scene-caption">Ready when you are</span><button class="icon-button flip-button" id="flip-camera" type="button" aria-label="Switch between front and back cameras" disabled><svg><use href="#i-flip"/></svg></button></div>
+            </div>
+
+            <div class="camera-controls">
+              <button class="primary-button" id="toggle-camera" type="button"><svg><use id="camera-button-icon" href="#i-camera"/></svg><span id="camera-button-label">Start camera</span></button>
+              <button class="secondary-button" id="choose-photo" type="button"><svg><use href="#i-photo"/></svg><span>Photo</span></button>
+              <input type="file" id="photo-input" accept="image/*" capture="environment" hidden>
+            </div>
+            <div class="status-line" role="status" aria-live="polite"><span class="status-indicator" id="status-indicator" data-state="loading"></span><span id="status-text">Connecting to your model…</span></div>
+          </section>
+
+          <section class="insights" aria-label="Detection results and model settings">
+            <div class="result-card">
+              <div class="section-heading"><h2>In view</h2><span class="timing" id="timing">Awaiting a scan</span></div>
+              <div class="primary-result"><div><p class="result-name" id="result-name">Nothing scanned yet</p><p class="result-description" id="result-description">A label will appear when your model sees an object.</p></div><span class="result-confidence" id="result-confidence">—</span></div>
+              <div id="detections" class="detections" hidden></div>
+            </div>
+
+            <div class="class-section"><div class="section-heading"><h2 id="classes-title">Model classes</h2><span class="class-count" id="class-count"></span></div><div class="class-chips" id="class-chips"></div><p class="class-note" id="class-note">Classes come directly from your checkpoint.</p></div>
+
+            <details class="model-settings" id="model-settings">
+              <summary><span><span class="settings-title">Model &amp; settings</span><span class="settings-subtitle" id="model-summary">Connect your YOLO checkpoint</span></span><svg><use href="#i-chevron"/></svg></summary>
+              <div class="settings-content">
+                <p class="field-label">UPDATE YOUR MODEL HERE</p>
+                <code class="model-path" id="model-path">app/models/best.pt</code>
+                <p class="settings-copy">Replace this checkpoint on your server, then reload. Class names update automatically.</p>
+                <button class="reload-button" id="reload-model" type="button">Reload model</button>
+                <p class="model-message" id="model-message"></p>
+                <div class="confidence-heading"><label for="confidence">Minimum confidence</label><output id="confidence-value" for="confidence">35%</output></div>
+                <input type="range" id="confidence" min="0" max="100" step="1" value="35">
+                <p class="settings-copy confidence-copy">Higher values show fewer, more confident detections.</p>
+              </div>
+            </details>
+          </section>
+        </div>
+      </main>
+      <footer><svg><use href="#i-leaf"/></svg><span>Frames processed on your server. Nothing saved.</span></footer>
+      <noscript><p class="noscript">Enable JavaScript to use the camera and see model predictions.</p></noscript>
+    </div>
+  </body>
+</html>
