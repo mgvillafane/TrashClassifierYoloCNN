@@ -11,6 +11,34 @@ queue. Live update speed depends on your computer and checkpoint.
 
 ## Start on this computer
 
+### GitHub Pages on a phone
+
+Open [SORT on GitHub Pages](https://mgvillafane.github.io/TrashClassifierYoloCNN/)
+in Chrome on Android, wait for the model to load, tap **Start camera**, and allow
+camera access.
+
+The Pages build runs `YOLO_full_TACO` inside the phone's browser, using the
+exported ONNX model. It needs no Python server, tunnel, local Wi-Fi connection,
+or certificate installation. Camera frames are processed in a worker on the
+device and are not uploaded. The model and runtime files are public downloads.
+The first model download is about 78 MiB, plus the browser runtime. Performance
+depends on the phone; GPU acceleration is used when available, with a CPU fallback.
+
+To rebuild the static artifact:
+
+```powershell
+uv pip install --python .venv/Scripts/python.exe onnx onnxruntime onnxslim
+npm install --prefix app/.runtime/pages-tools --ignore-scripts --save-exact onnxruntime-web@1.31.1
+.\.venv\Scripts\python.exe -B app/build_pages.py --export
+```
+
+Publish only `app/.pages-dist/` to the Pages source branch, including the ONNX
+model, runtime files, and `.nojekyll`. All asset URLs are relative so the app
+works at a repository subpath. The export uses the preserved TACO weights with
+320-pixel inputs for phone inference. The Python app below keeps 640-pixel inputs.
+
+### Python server
+
 From the repository root in PowerShell, use the existing Python environment:
 
 ```powershell

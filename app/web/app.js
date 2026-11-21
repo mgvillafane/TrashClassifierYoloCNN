@@ -2,6 +2,7 @@
 
 (() => {
   const $ = (id) => document.getElementById(id);
+  const browserRuntime = window.sortBrowserRuntime || null;
   const ui = {
     video: $("camera"), photo: $("photo-preview"), overlay: $("overlay"),
     viewfinder: $("viewfinder"), idle: $("viewfinder-idle"), live: $("live-badge"),
@@ -104,7 +105,7 @@
       ? "Labels read directly from your active checkpoint."
       : "Available after your trained checkpoint is connected.";
     const modelPath = model.path || "models/best.pt";
-    ui.modelPath.textContent = /^(?:[A-Za-z]:|\/|app[\\/])/.test(modelPath) ? modelPath : `app/${modelPath}`;
+    ui.modelPath.textContent = browserRuntime ? model.filename : /^(?:[A-Za-z]:|\/|app[\\/])/.test(modelPath) ? modelPath : `app/${modelPath}`;
     ui.modelSummary.textContent = model.ready
       ? `${model.filename || "best.pt"} · ${actualClasses.length} classes`
       : "Checkpoint needed · tap to set up";
@@ -141,15 +142,23 @@
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60000);
     try {
+      if (browserRuntime) {
+        const model = await browserRuntime.load((message) => {
+          status(message, "loading");
+          ui.modelMessage.textContent = message;
+        });
+        renderModel(model);
+        return;
+      }
       const response = await fetch(reload ? "/api/model/reload" : "/api/model", {
         method: reload ? "POST" : "GET", cache: "no-store", signal: controller.signal,
       });
       renderModel(await readResponse(response));
     } catch (error) {
-      status(error.name === "AbortError" ? "Model loading timed out. Try reloading." : "Server unavailable. Keep the Python server running, then reload.", "error");
-      ui.modelMessage.textContent = error.name === "AbortError" ? "The server took too long to respond." : "Could not reach the model server.";
+      status(browserRuntime ? "Could not load the model. Check your connection and tap Reload model." : error.name === "AbortError" ? "Model loading timed out. Try reloading." : "Server unavailable. Keep the Python server running, then reload.", "error");
+      ui.modelMessage.textContent = browserRuntime ? error.message : error.name === "AbortError" ? "The server took too long to respond." : "Could not reach the model server.";
       if (!state.model) {
-        ui.modelSummary.textContent = "Server unavailable";
+        ui.modelSummary.textContent = browserRuntime ? "Model not loaded" : "Server unavailable";
         ui.settings.open = true;
       }
     } finally {
@@ -268,6 +277,10 @@
 
   async function predict(blob, session) {
     if (session !== state.session) return null;
+    if (browserRuntime) {
+      const result = await browserRuntime.predict(blob, state.confidence);
+      return session === state.session ? result : null;
+    }
     const controller = new AbortController();
     const request = { controller, session };
     state.request = request;
@@ -313,14 +326,14 @@
     } catch (error) {
       if (session !== state.session || error.name === "AbortError") return;
       state.networkFailures += 1;
-      clearResults("Scan interrupted", "Results will return when the server responds.");
+      clearResults("Scan interrupted", browserRuntime ? "Trying the next camera frame." : "Results will return when the server responds.");
       if (error.code === 503) {
         stopScene();
         status("Model unavailable. Check your checkpoint and reload it.", "error");
         ui.settings.open = true;
         return;
       }
-      status(error.code === 429 ? "Server is busy. Trying the next frame…" : error.code === 408 ? error.message : "Connection interrupted. Retrying…", error.code === 429 ? "loading" : "warning");
+      status(error.code === 429 ? "Model is busy. Trying the next frame…" : error.code === 408 ? error.message : browserRuntime ? "Could not process this frame. Retrying…" : "Connection interrupted. Retrying…", error.code === 429 ? "loading" : "warning");
       delay = Math.min(4000, 750 * state.networkFailures);
     }
     scheduleFrame(session, delay);
@@ -500,7 +513,7 @@
     if (document.hidden && (state.mode === "camera" || state.opening)) stopScene("Camera paused while away. Tap Start camera to resume.");
   });
   window.addEventListener("pagehide", () => stopScene());
-  window.addEventListener("offline", () => status("You’re offline. Reconnect to your model server to scan.", "warning"));
+  window.addEventListener("offline", () => status(browserRuntime && state.model?.ready ? "Offline. Your loaded model can still scan on this device." : "You’re offline. Reconnect to load your model.", "warning"));
   window.addEventListener("online", () => {
     if (state.mode === "idle") loadModel();
   });

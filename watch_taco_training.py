@@ -14,9 +14,25 @@ from sync_taco_databricks import find_cli
 from taco_yolo import ROOT, write_json
 
 
+def tensorboard_filename(name):
+    """Startup must sort before epoch logs, including files from older jobs."""
+    return "events.out.tfevents.000000.startup" if name == "events.out.tfevents.startup" else name
+
+
+def normalize_startup_log(directory):
+    legacy = Path(directory) / "events.out.tfevents.startup"
+    ordered = Path(directory) / tensorboard_filename(legacy.name)
+    if legacy.is_file():
+        if ordered.exists():
+            # Keep any original bytes without leaving a late-sorting event file.
+            legacy.rename(Path(directory) / "startup-event.backup")
+        else:
+            legacy.rename(ordered)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--run-id")
     parser.add_argument("--remote-run", required=True)
     parser.add_argument("--local-dir", type=Path, required=True)
     parser.add_argument("--profile", default="Marcos Gomez Villafane")
@@ -24,7 +40,10 @@ def main(argv=None):
     parser.add_argument("--interval", type=int, default=10)
     parser.add_argument("--open-browser", action="store_true")
     parser.add_argument("--background", action="store_true")
+    parser.add_argument("--logs-only", action="store_true", help="Sync TensorBoard files without querying job progress")
     args = parser.parse_args(argv)
+    if not args.logs_only and not args.run_id:
+        parser.error("--run-id is required unless --logs-only is selected")
     local = args.local_dir.resolve()
     local.mkdir(parents=True, exist_ok=True)
     if args.background:
@@ -35,6 +54,7 @@ def main(argv=None):
                                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         print(json.dumps({"watcher_pid": process.pid, "log": str(local / "watcher.log")}))
         return
+    normalize_startup_log(local)
     cli = find_cli()
     remote = args.remote_run.removeprefix("dbfs:").rstrip("/")
     if not remote.startswith("/Volumes/"):
@@ -90,12 +110,13 @@ def main(argv=None):
     def mirror():
         nonlocal mirrored_events
         entries = json.loads(command(["fs", "ls", f"dbfs:{remote}", "-o", "json"]))
-        for entry in entries:
+        # A reader only advances through filenames in increasing order.
+        for entry in sorted(entries, key=lambda entry: tensorboard_filename(entry["name"])):
             name = entry["name"]
             if entry.get("is_directory") or not (name.startswith("events.out.tfevents.")
                     or name in {"results.csv", "training_status.json", "artifacts.json", "run_config.json"}):
                 continue
-            target = local / name
+            target = local / tensorboard_filename(name)
             # Events are immutable and only uploaded after their writer closes.
             if name.startswith("events.out.tfevents.") and target.is_file():
                 continue
@@ -110,25 +131,32 @@ def main(argv=None):
 
     while True:
         finished = False
-        try:
-            state = json.loads(command(["jobs", "get-run", args.run_id, "-o", "json"]))
-            compact = {"state": state.get("state"), "run_page_url": state.get("run_page_url"),
-                       "run_id": state.get("run_id"), "tasks": [
-                           {"task_key": task.get("task_key"), "run_id": task.get("run_id"),
-                            "state": task.get("state")} for task in state.get("tasks", [])]}
-            write_json(local / "databricks_run.json", compact)
-            current = json.dumps(compact["state"], sort_keys=True)
-            if current != last_state:
-                print(f"Databricks state: {current}", flush=True)
-                last_state = current
-            finished = (state.get("state") or {}).get("life_cycle_state") in {
-                "TERMINATED", "SKIPPED", "INTERNAL_ERROR"}
-        except Exception as exc:
-            print(f"Waiting for Databricks status: {exc}", flush=True)
+        if not args.logs_only:
+            try:
+                state = json.loads(command(["jobs", "get-run", args.run_id, "-o", "json"]))
+                compact = {"state": state.get("state"), "run_page_url": state.get("run_page_url"),
+                           "run_id": state.get("run_id"), "tasks": [
+                               {"task_key": task.get("task_key"), "run_id": task.get("run_id"),
+                                "state": task.get("state")} for task in state.get("tasks", [])]}
+                write_json(local / "databricks_run.json", compact)
+                current = json.dumps(compact["state"], sort_keys=True)
+                if current != last_state:
+                    print(f"Databricks state: {current}", flush=True)
+                    last_state = current
+                finished = (state.get("state") or {}).get("life_cycle_state") in {
+                    "TERMINATED", "SKIPPED", "INTERNAL_ERROR"}
+            except Exception as exc:
+                print(f"Waiting for Databricks status: {exc}", flush=True)
         try:
             mirror()
         except Exception as exc:
             print(f"Waiting for epoch logs: {exc}", flush=True)
+        if args.logs_only:
+            status_path = local / "training_status.json"
+            try:
+                finished = json.loads(status_path.read_text(encoding="utf-8")).get("training_finished", False)
+            except (OSError, ValueError):
+                pass
         write_json(local / "mirror_status.json", {
             "mirrored_event_files": mirrored_events, "last_poll_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "training_run_finished": finished, "tensorboard_url": url})

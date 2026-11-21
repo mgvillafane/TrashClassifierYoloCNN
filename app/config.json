@@ -1,5 +1,5 @@
 {
-  "model_path": "models/best.pt",
+  "model_path": "models/YOLO_full_TACO.pt",
   "confidence": 0.35,
   "image_size": 640,
   "device": "cpu"
