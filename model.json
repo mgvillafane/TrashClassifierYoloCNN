@@ -1,0 +1,19 @@
+{
+  "model_url": "./models/YOLO_full_TACO.onnx",
+  "classes": [
+    "cardboard",
+    "glass",
+    "metal",
+    "paper",
+    "plastic",
+    "trash"
+  ],
+  "image_size": 320,
+  "confidence": 0.35,
+  "model_bytes": 81595991,
+  "model_sha256": "234aa9066ce397e558f4a08395973c5ee79feb3afe75dc8c7ac4609d58097b8f",
+  "source_checkpoint": "YOLO_full_TACO.pt",
+  "source_sha256": "c891c3fe5f2cb6af6d467b5115bb9e530a55d38cc9cc86e26af6069962a83559",
+  "runtime_version": "1.31.1",
+  "processing": "browser-only"
+}
