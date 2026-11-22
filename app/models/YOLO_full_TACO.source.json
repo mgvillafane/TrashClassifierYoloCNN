@@ -1,0 +1,17 @@
+{
+  "filename": "YOLO_full_TACO.pt",
+  "sha256": "c891c3fe5f2cb6af6d467b5115bb9e530a55d38cc9cc86e26af6069962a83559",
+  "architecture": "YOLO26 Medium",
+  "source": "/Volumes/workspace/default/tacotrashdata/reports/taco_yolo/databricks_trashnet_yolo26m_40epochs_2184af/weights/best.pt",
+  "dataset": "TACO, mapped to six material classes",
+  "epochs_completed": 40,
+  "classes": {
+    "0": "cardboard",
+    "1": "glass",
+    "2": "metal",
+    "3": "paper",
+    "4": "plastic",
+    "5": "trash"
+  },
+  "downloaded_at": "2026-11-21T21:20:44.361426+00:00"
+}

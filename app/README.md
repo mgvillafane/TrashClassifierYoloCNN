@@ -1,6 +1,6 @@
 # SORT — live trash detection
 
-A minimal phone interface for this project's YOLO detector. Open it in Safari or
+A minimal phone interface for this project's YOLO detectors. Open it in Safari or
 Chrome, start the rear camera, and see detected objects with their labels and
 confidence. You can also analyze a photo.
 
@@ -17,11 +17,27 @@ Open [SORT on GitHub Pages](https://mgvillafane.github.io/TrashClassifierYoloCNN
 in Chrome on Android, wait for the model to load, tap **Start camera**, and allow
 camera access.
 
-The Pages build runs `YOLO_full_TACO` inside the phone's browser, using the
+Use the **Detection model** dropdown above the results to switch between:
+
+- **SortWaste · YOLO26 Medium · 7 classes** (default): `YOLO26m_SortWaste_7class_20261121.pt`,
+  the best validation checkpoint from the November 21 SortWaste run. Training
+  completed 16 epochs with early stopping. Classes: cardboard, glass, metal,
+  paper, plastic, trash, and carton.
+- **TACO · YOLO26 Medium · 6 classes**: the preserved `YOLO_full_TACO.pt` checkpoint,
+  with the same materials except carton.
+
+Switching stops the current scan and clears its results. Start the camera or
+choose a photo again to compare models. The dropdown works in both the Python
+app and the GitHub Pages build. Model names, paths, and class orders are listed
+in `app/models.json`; provenance and SHA-256 hashes are in `app/models/*.source.json`.
+Weight binaries remain local, ignored files.
+
+The Pages build runs the selected model inside the phone's browser, using the
 exported ONNX model. It needs no Python server, tunnel, local Wi-Fi connection,
 or certificate installation. Camera frames are processed in a worker on the
 device and are not uploaded. The model and runtime files are public downloads.
-The first model download is about 78 MiB, plus the browser runtime. Performance
+Each model's first download is about 78 MiB, plus the browser runtime. Only the
+selected model is downloaded and loaded; switching releases the previous worker. Performance
 depends on the phone; GPU acceleration is used when available, with a CPU fallback.
 
 To rebuild the static artifact:
@@ -33,8 +49,8 @@ npm install --prefix app/.runtime/pages-tools --ignore-scripts --save-exact onnx
 ```
 
 Publish only `app/.pages-dist/` to the Pages source branch, including the ONNX
-model, runtime files, and `.nojekyll`. All asset URLs are relative so the app
-works at a repository subpath. The export uses the preserved TACO weights with
+models, runtime files, and `.nojekyll`. All asset URLs are relative so the app
+works at a repository subpath. The export uses both registered checkpoints with
 320-pixel inputs for phone inference. The Python app below keeps 640-pixel inputs.
 
 ### Python server
@@ -106,16 +122,18 @@ this is not an offline detector or an App Store application.
 
 ## Update the model here
 
-**Replace `app/models/best.pt`, then tap “Reload model” in the app's Model panel.**
+**Choose a model in the Detection model dropdown.** To replace its local weights,
+update the corresponding file under `app/models/`, then tap **Reload model**.
 You do not need to rebuild the interface or restart Python. Stop the camera
 before replacing a checkpoint, and finish copying the file before reloading.
 Only load checkpoints you trust: PyTorch model files may execute Python code.
 
-To keep a checkpoint somewhere else, edit **`app/config.json`**:
+To keep a checkpoint somewhere else, update its path in **`app/models.json`**.
+For the startup default, also update **`app/config.json`**:
 
 ```json
 {
-  "model_path": "models/best.pt",
+  "model_path": "models/YOLO26m_SortWaste_7class_20261121.pt",
   "confidence": 0.35,
   "image_size": 640,
   "device": "cpu"
@@ -123,10 +141,11 @@ To keep a checkpoint somewhere else, edit **`app/config.json`**:
 ```
 
 Relative model paths start at `app/`; absolute paths also work. Tap Reload model
-after changing the configuration. Use `"device": "0"` with a CUDA-enabled PyTorch
+after changing its registered path or inference settings. Use `"device": "0"` with a CUDA-enabled PyTorch
 environment for the first GPU. The included environment uses CPU inference.
 
-The current training defines **cardboard, glass, metal, paper, plastic, trash**.
+The SortWaste model defines **cardboard, glass, metal, paper, plastic, trash, carton**.
+The TACO model defines the first six classes.
 The app reads class IDs and labels from the checkpoint itself, so a later model
 can change the class list. Detection and segmentation checkpoints are supported;
 the interface uses their bounding boxes. It does not change material labels into
@@ -138,7 +157,7 @@ downloaded for this app, is recorded in `app/models/source.json`; checkpoint
 binaries are ignored by Git.
 
 If the weights are absent or invalid, the app explains the problem and shows no
-invented predictions. The expected six classes are labeled separately until a
+invented predictions. The expected classes for the selected model are labeled separately until a
 checkpoint is loaded.
 
 ## Controls
@@ -148,6 +167,7 @@ checkpoint is loaded.
 - **Analyze photo:** choose or capture a photo without a continuous camera stream.
 - **Confidence:** hide detections below the chosen threshold.
 - **Model:** inspect active labels and path, then reload a replacement checkpoint.
+- **Detection model:** select SortWaste or TACO; scanning stops during the switch.
 
 Switching away from the page stops the camera. Tap Start camera to resume.
 The first prediction can take longer while PyTorch initializes. A photo with no
@@ -163,6 +183,8 @@ node --check app/web/app.js
 The API accepts a raw JPEG, PNG, or WebP image body at
 `POST /api/predict?confidence=0.35` and returns normalized boxes and inference
 timing. `GET /api/model` reports readiness and actual checkpoint labels;
-`POST /api/model/reload` reloads the local configuration and trusted weights.
+`POST /api/model/reload?model_id=sortwaste` (or `taco`) switches to a registered
+checkpoint. Without `model_id`, it reloads the default in the local configuration.
+`GET /api/model` also lists the available models and active selection.
 Uploaded frames are limited to 5 MiB. The backend rejects invalid images and
 returns a busy response while another inference or reload is running.

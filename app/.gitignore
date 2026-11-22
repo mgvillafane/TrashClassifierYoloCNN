@@ -7,3 +7,4 @@ __pycache__/
 models/*
 !models/.gitkeep
 !models/source.json
+!models/*.source.json

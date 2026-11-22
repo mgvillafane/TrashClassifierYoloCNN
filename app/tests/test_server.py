@@ -150,6 +150,47 @@ class ServerTests(unittest.TestCase):
             finally:
                 self.runtime.lock.release()
 
+    def model_catalog(self):
+        choices = [
+            {"id": "taco", "name": "TACO", "path": "models/best.pt", "classes": ["cardboard", "plastic"]},
+            {"id": "sortwaste", "name": "SortWaste", "path": "models/sortwaste.pt", "classes": ["cardboard", "carton"]},
+        ]
+        (self.root / "models.json").write_text(json.dumps({"default_model": "taco", "models": choices}))
+
+    def test_switching_models_updates_inference_labels_and_can_switch_back(self):
+        self.checkpoint()
+        self.checkpoint("models/sortwaste.pt")
+        self.model_catalog()
+        alternate = Detector()
+        alternate.names = {0: "cardboard", 1: "carton"}
+        self.runtime.loader = lambda path: alternate if path.name == "sortwaste.pt" else self.detector
+        with TestClient(create_app(self.runtime)) as client:
+            initial = client.get("/api/model").json()
+            self.assertEqual(initial["selected_model"], "taco")
+            self.assertEqual(len(initial["available_models"]), 2)
+            switched = client.post("/api/model/reload?model_id=sortwaste").json()
+            self.assertTrue(switched["ready"])
+            self.assertEqual(switched["selected_model"], "sortwaste")
+            self.assertEqual(switched["classes"][1]["name"], "carton")
+            self.assertEqual(switched["confidence"], 0.35)
+            prediction = client.post("/api/predict", content=image_bytes()).json()
+            self.assertEqual(prediction["detections"][0]["class_name"], "carton")
+            switched_back = client.post("/api/model/reload?model_id=taco").json()
+            self.assertEqual(switched_back["classes"][1]["name"], "plastic")
+
+    def test_unknown_model_cannot_load_arbitrary_paths_or_discard_active_model(self):
+        self.checkpoint()
+        self.model_catalog()
+        with TestClient(create_app(self.runtime)) as client:
+            self.assertEqual(client.post("/api/model/reload?model_id=../../other.pt").status_code, 400)
+            self.assertTrue(client.get("/api/model").json()["ready"])
+            self.assertEqual(len(self.loaded), 1)
+            missing = client.post("/api/model/reload?model_id=sortwaste").json()
+            self.assertFalse(missing["ready"])
+            self.assertFalse(missing["available_models"][1]["available"])
+            self.assertEqual(client.post("/api/predict", content=image_bytes()).status_code, 503)
+            self.assertTrue(client.post("/api/model/reload?model_id=taco").json()["ready"])
+
     def test_incompatible_checkpoint_is_not_marked_ready(self):
         self.checkpoint()
         self.detector.task = "classify"

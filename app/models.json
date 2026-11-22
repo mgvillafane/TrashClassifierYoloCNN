@@ -1,0 +1,17 @@
+{
+  "default_model": "sortwaste",
+  "models": [
+    {
+      "id": "sortwaste",
+      "name": "SortWaste · YOLO26 Medium · 7 classes",
+      "path": "models/YOLO26m_SortWaste_7class_20261121.pt",
+      "classes": ["cardboard", "glass", "metal", "paper", "plastic", "trash", "carton"]
+    },
+    {
+      "id": "taco",
+      "name": "TACO · YOLO26 Medium · 6 classes",
+      "path": "models/YOLO_full_TACO.pt",
+      "classes": ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
+    }
+  ]
+}

@@ -14,6 +14,8 @@ const context = canvas.getContext("2d", { willReadFrequently: true });
 function progress(message) { self.postMessage({ type: "progress", message }); }
 
 async function loadModel(message) {
+  if (session) await session.release();
+  session = null;
   classes = message.classes;
   size = message.imageSize;
   const response = await fetch(message.url);
@@ -30,7 +32,7 @@ async function loadModel(message) {
     length += value.length;
     const percent = total ? Math.floor(length / total * 100) : -1;
     if (percent !== lastPercent) {
-      progress(`Downloading YOLO_full_TACO${percent >= 0 ? ` · ${percent}%` : "…"}`);
+      progress(`Downloading ${message.name}${percent >= 0 ? ` · ${percent}%` : "…"}`);
       lastPercent = percent;
     }
   }

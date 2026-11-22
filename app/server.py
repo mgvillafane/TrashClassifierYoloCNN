@@ -1,13 +1,13 @@
 """Serve the phone UI and run bounded, sequential YOLO inference.
 
-Update config.json's model_path or replace models/best.pt, then use Reload model
-in the UI. Checkpoints are local trusted files; this server never downloads weights.
+Select a checkpoint registered in models.json, or set config.json's model_path.
+Checkpoints are local trusted files; this server never downloads weights.
 """
 
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 import json
 import logging
@@ -81,12 +81,17 @@ class ModelRuntime:
         self.status = self._status(False, "Model has not been loaded yet.")
 
     def _status(self, ready: bool, message: str, names: dict | None = None) -> dict:
+        choices = self.model_choices()
+        selected = next((item for item in choices if item["path"] == self.settings.model_path), None)
         return {
             "ready": ready,
             "filename": Path(self.settings.model_path).name,
             "path": self.settings.model_path,
             "classes": [{"id": int(key), "name": str(value)} for key, value in (names or {}).items()],
-            "expected_classes": expected_classes(),
+            "expected_classes": selected["classes"] if selected else expected_classes(),
+            "available_models": choices,
+            "selected_model": selected["id"] if selected else None,
+            "name": selected["name"] if selected else Path(self.settings.model_path).name,
             "confidence": self.settings.confidence,
             "message": message,
         }
@@ -94,13 +99,28 @@ class ModelRuntime:
     def metadata(self) -> dict:
         return dict(self.status)
 
-    def reload(self) -> dict:
+    def model_choices(self) -> list[dict]:
+        catalog = self.config_path.parent / "models.json"
+        if not catalog.is_file():
+            return []
+        choices = json.loads(catalog.read_text(encoding="utf-8"))["models"]
+        return [{**item, "available": (self.config_path.parent / item["path"]).is_file()}
+                for item in choices]
+
+    def reload(self, model_id: str | None = None) -> dict:
         if not self.lock.acquire(blocking=False):
             raise HTTPException(429, "Model is busy. Stop scanning and try again.")
         try:
+            selected = None
+            if model_id is not None:
+                selected = next((item for item in self.model_choices() if item["id"] == model_id), None)
+                if selected is None:
+                    raise HTTPException(400, "Unknown model. Choose one of the listed models.")
             self.model = None
             self.status = self._status(False, "Loading model…")
             self.settings = Settings.read(self.config_path)
+            if selected:
+                self.settings = replace(self.settings, model_path=selected["path"])
             configured = Path(self.settings.model_path).expanduser()
             path = configured if configured.is_absolute() else self.config_path.parent / configured
             path = path.resolve()
@@ -123,6 +143,8 @@ class ModelRuntime:
                 raise ValueError("This checkpoint does not contain class names.")
             self.model = model
             self.status = self._status(True, f"{len(names)} classes loaded from {path.name}.", names)
+        except HTTPException:
+            raise
         except Exception as exc:
             LOGGER.warning("Could not load configured model: %s", exc)
             self.status = self._status(False, f"Could not load model: {exc}")
@@ -230,8 +252,8 @@ def create_app(runtime: ModelRuntime | None = None) -> FastAPI:
         return runtime.metadata()
 
     @application.post("/api/model/reload")
-    async def reload_model():
-        return await run_in_threadpool(runtime.reload)
+    async def reload_model(model_id: str | None = Query(None)):
+        return await run_in_threadpool(runtime.reload, model_id)
 
     @application.post("/api/predict")
     async def predict(request: Request, confidence: float | None = Query(None, ge=0, le=1)):

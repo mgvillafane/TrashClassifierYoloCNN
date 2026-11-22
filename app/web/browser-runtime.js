@@ -5,10 +5,28 @@
   let worker;
   let loading;
   let metadata;
+  let manifest;
   let busy = false;
   let sequence = 0;
   let progress;
   const requests = new Map();
+
+  function resetWorker() {
+    worker?.terminate();
+    worker = null;
+    for (const pending of requests.values()) pending.reject(new Error("Model changed. Start a new scan."));
+    requests.clear();
+    metadata = null;
+    loading = null;
+  }
+
+  async function catalog() {
+    if (manifest) return manifest;
+    const response = await fetch(new URL("./model.json", document.baseURI), { cache: "no-store" });
+    if (!response.ok) throw new Error("The model manifest is unavailable.");
+    manifest = await response.json();
+    return manifest;
+  }
 
   function request(type, payload = {}) {
     return new Promise((resolve, reject) => {
@@ -42,31 +60,38 @@
   }
 
   window.sortBrowserRuntime = {
-    async load(onProgress) {
+    catalog,
+    async load(onProgress, modelId = null, force = false) {
       progress = onProgress;
-      if (metadata) return metadata;
+      const manifest = await catalog();
+      const selected = manifest.models.find((model) => model.id === (modelId || manifest.default_model));
+      if (!selected) throw new Error("Unknown model. Choose one of the listed models.");
+      if (metadata?.selected_model === selected.id && !force) return metadata;
       if (loading) return loading;
-      if (!worker) createWorker();
+      resetWorker();
+      createWorker();
       loading = (async () => {
         onProgress?.("Downloading your model. Camera images stay on this device.");
-        const response = await fetch(new URL("./model.json", document.baseURI));
-        if (!response.ok) throw new Error("The model manifest is unavailable.");
-        const manifest = await response.json();
         const result = await request("load", {
-          url: new URL(manifest.model_url, document.baseURI).href,
-          classes: manifest.classes,
-          imageSize: manifest.image_size,
+          url: new URL(selected.model_url, document.baseURI).href,
+          name: selected.name,
+          classes: selected.classes,
+          imageSize: selected.image_size,
           backend: new URLSearchParams(location.search).get("backend") || "auto",
         });
         metadata = {
-          ready: true, filename: "YOLO_full_TACO.onnx", path: "models/YOLO_full_TACO.onnx",
-          classes: manifest.classes.map((name, id) => ({ id, name })),
-          expected_classes: manifest.classes, confidence: manifest.confidence,
-          message: `YOLO_full_TACO runs on this device (${result.backend === "webgpu" ? "GPU" : "CPU"}). Camera images are not uploaded.`,
+          ready: true, filename: selected.model_url.split("/").pop(), path: selected.model_url,
+          name: selected.name, selected_model: selected.id, available_models: manifest.models,
+          classes: selected.classes.map((name, id) => ({ id, name })),
+          expected_classes: selected.classes, confidence: selected.confidence,
+          message: `${selected.name} runs on this device (${result.backend === "webgpu" ? "GPU" : "CPU"}). Camera images are not uploaded.`,
         };
         return metadata;
-      })().catch((error) => {
+      })().then((result) => {
         loading = null;
+        return result;
+      }).catch((error) => {
+        resetWorker();
         throw error;
       });
       return loading;

@@ -1,0 +1,22 @@
+{
+  "filename": "YOLO26m_SortWaste_7class_20261121.pt",
+  "sha256": "ba6e96fc8bc0b6debc07110475a3a6e6ec79edf409e372791e48deca11973c20",
+  "architecture": "YOLO26 Medium",
+  "source": "/Volumes/workspace/default/tacotrashdata/reports/sortwaste_yolo/sortwaste_yolo26m_40epochs_20261121T213604Z_1bf985/weights/best.pt",
+  "run_name": "sortwaste_yolo26m_40epochs_20261121T213604Z_1bf985",
+  "run_url": "https://dbc-fd89e1b5-e4fc.cloud.databricks.com/?o=7474659242886734#job/316105348967199/run/841447315099411",
+  "dataset": "SortWaste official train/validation splits, seven material classes",
+  "initial_checkpoint": "YOLO_full_TACO.pt",
+  "epochs_completed": 16,
+  "checkpoint_selection": "best validation fitness (Ultralytics)",
+  "classes": {
+    "0": "cardboard",
+    "1": "glass",
+    "2": "metal",
+    "3": "paper",
+    "4": "plastic",
+    "5": "trash",
+    "6": "carton"
+  },
+  "downloaded_at": "2026-11-22T20:01:51.360720+00:00"
+}
