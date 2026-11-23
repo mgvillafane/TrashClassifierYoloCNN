@@ -138,12 +138,15 @@ class Scored:
         return out
 
     def summary(self, classes, image_weights=None) -> dict[str, float]:
-        """Equal-weight class means over the classes present (n_gt > 0)."""
-        rows = self.per_class(image_weights)
-        present = [c for c in classes if rows[c]["n_gt"] > 0]
-        mean = lambda key: float(np.mean([rows[c][key] for c in present])) if present else float("nan")  # noqa: E731
-        return {"map50": mean("ap50"), "macro_f1": mean("f1"), "macro_precision": mean("precision"),
-                "macro_recall": mean("recall"), "classes": len(present)}
+        return summarize(self.per_class(image_weights), classes)
+
+
+def summarize(rows: dict[int, dict], classes) -> dict[str, float]:
+    """Equal-weight class means over the classes present (n_gt > 0), from per_class() rows."""
+    present = [c for c in classes if rows[c]["n_gt"] > 0]
+    mean = lambda key: float(np.mean([rows[c][key] for c in present])) if present else float("nan")  # noqa: E731
+    return {"map50": mean("ap50"), "macro_f1": mean("f1"), "macro_precision": mean("precision"),
+            "macro_recall": mean("recall"), "classes": len(present)}
 
 
 def bootstrap_weights(n_images: int, repeats: int = 1000, seed: int = 42) -> np.ndarray:

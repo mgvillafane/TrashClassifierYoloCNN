@@ -213,11 +213,10 @@ for yolo_name, weights in WEIGHTS.items():
     labellers = {SYSTEMS[s][1] for s in SYSTEMS if SYSTEMS[s][0] == yolo_name} - {"yolo"}
     classifiers = {name: load_classifier(CLASSIFIERS[name])[0] for name in labellers}
     start, result = time.time(), {}
-    by_path = {os.path.realpath(LOCAL / rel): rel for rel in needed}
-    for r in model.predict(source=[str(LOCAL / rel) for rel in needed], stream=True, imgsz=640, conf=0.01,
-                           iou=0.7, max_det=100, agnostic_nms=True, device=0 if DEVICE.type == "cuda" else "cpu",
-                           verbose=False):
-        rel = by_path[os.path.realpath(r.path)]
+    # One photo per call: Ultralytics turns a Python list of paths into ONE batch (all photos on the GPU at once).
+    for rel in needed:
+        r = model.predict(source=str(LOCAL / rel), imgsz=640, conf=0.01, iou=0.7, max_det=100, agnostic_nms=True,
+                          device=0 if DEVICE.type == "cuda" else "cpu", verbose=False)[0]
         boxes = r.boxes.xyxyn.cpu().numpy().reshape(-1, 4)
         conf, cls = r.boxes.conf.cpu().numpy(), r.boxes.cls.cpu().numpy().astype(int)
         keep = dm.agnostic_nms(boxes, conf)  # one box per object, whatever the model's own NMS did
@@ -247,13 +246,15 @@ for test_set, rels in lists.items():
             continue
         images = [{"gt_boxes": GT[r][0], "gt_labels": GT[r][1], **PREDICTIONS[yolo_name][r]} for r in rels]
         s = dm.Scored(images, f"{labeller}_label", f"{labeller}_score")
-        for c, values in s.per_class().items():
+        point_rows = s.per_class()
+        for c, values in point_rows.items():
             rows_class.append({"test_set": test_set, "system": system, "class": dm.CLASSES[c], **values})
+        sample_rows = [s.per_class(w) for w in weights]  # once per resample, shared by both class scopes
         for scope, classes in (("shared3", dm.SHARED3), ("all6", dm.ALL6)):
             if scope == "all6" and (system not in KNOWS_ALL_SIX or test_set == "sortwaste_test"):
                 continue  # SortWaste has only cardboard, metal and plastic
-            point = s.summary(classes)
-            samples = [s.summary(classes, w) for w in weights]
+            point = dm.summarize(point_rows, classes)
+            samples = [dm.summarize(r, classes) for r in sample_rows]
             scored[(test_set, system, scope)] = samples
             row = {"test_set": test_set, "system": system, "classes_scored": scope, **point}
             for key in ("map50", "macro_f1"):
