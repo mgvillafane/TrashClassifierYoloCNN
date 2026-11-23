@@ -1,4 +1,8 @@
-"""Run classifier experiments C1–C4 on the shared Databricks classifier export."""
+"""Run classifier experiments C1–C5 on the shared Databricks classifier export.
+
+C5 trains on SortWaste only (class-balanced sampling like C4); it is the classifier of the
+SortWaste-only pipeline in the YOLO experiments.
+"""
 
 import argparse
 import csv
@@ -19,7 +23,9 @@ EXPERIMENTS = {
     'C2': ('realwaste',),
     'C3': ('trashnet', 'realwaste'),
     'C4': DATASETS,
+    'C5': ('sortwaste',),
 }
+BALANCED = {'C4', 'C5'}  # class-balanced sampling and SortWaste selection subset
 DEFAULT_EPOCHS = {'cnn': 55, 'resnet-head': 20, 'resnet-layer4': 20}
 DEFAULT_DATA = Path('/Volumes/workspace/default/waste_data/processed/classifier')
 DEFAULT_WEIGHTS = Path('/Volumes/workspace/default/models/resnet_pretrained/torch_cache/'
@@ -105,7 +111,7 @@ def balanced_subset(rows, per_class_limit, seed):
     return sorted(selected, key=lambda row: str(row[0]))
 
 
-def c4_balanced_sampling(train_rows):
+def c4_balanced_sampling(train_rows, require_all_classes=True):
     """Give every class equal mass and split that mass equally across its datasets."""
     cell_counts = {}
     datasets_per_class = {label_id: 0 for label_id in range(len(CLASSES))}
@@ -116,7 +122,7 @@ def c4_balanced_sampling(train_rows):
     for _, label_id in cell_counts:
         datasets_per_class[label_id] += 1
     missing = [CLASSES[label_id] for label_id, count in datasets_per_class.items() if count == 0]
-    if missing:
+    if missing and require_all_classes:
         raise ValueError(f'C4 training data is missing classes: {missing}')
 
     flattened, weights = [], []
@@ -289,7 +295,7 @@ def train_model(args, architecture, epochs, train_rows, training_rows, sample_we
     criterion = nn.CrossEntropyLoss()
 
     train_loader = make_loader(args, training_rows, training=True, sample_weights=sample_weights)
-    c4 = args.experiment == 'C4'
+    c4 = args.experiment in BALANCED
     if c4:
         selection = 'dataset_average'
         selection_loaders = {
@@ -396,7 +402,7 @@ def train_model(args, architecture, epochs, train_rows, training_rows, sample_we
     return result
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('experiment', choices=EXPERIMENTS)
     parser.add_argument('--model', choices=(*MODELS, 'all'),
@@ -426,7 +432,7 @@ def main():
                         default=DEFAULT_C4_SORTWASTE_VAL_PER_CLASS,
                         help='SortWaste selection-validation examples per available class in C4 (default: 250).')
     parser.add_argument('--dry-run', action='store_true', help='Validate the index and print counts without training.')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.experiment == 'C2' and args.model in (None, 'all'):
         parser.error('C2 requires --model with one architecture selected from C1.')
     models = (args.model,) if args.model in MODELS else MODELS
@@ -449,8 +455,9 @@ def main():
     training_rows = [row for rows in train_rows.values() for row in rows]
     sample_weights = None
     c4_sampling = None
-    if args.experiment == 'C4':
-        training_rows, sample_weights, cell_counts = c4_balanced_sampling(train_rows)
+    if args.experiment in BALANCED:
+        training_rows, sample_weights, cell_counts = c4_balanced_sampling(
+            train_rows, require_all_classes=args.experiment == 'C4')
         c4_sampling = {
             'strategy': 'weighted_random_sampler',
             'replacement': True,
@@ -463,7 +470,7 @@ def main():
             },
         }
     sortwaste_val_total = len(validation_rows['sortwaste'])
-    if args.experiment == 'C4':
+    if args.experiment in BALANCED:
         selection_validation_rows = dict(validation_rows)
         selection_validation_rows['sortwaste'] = balanced_subset(
             validation_rows['sortwaste'], args.c4_sortwaste_val_per_class, args.seed,
@@ -493,7 +500,7 @@ def main():
                        sortwaste_validation_total=sortwaste_val_total,
                        sortwaste_validation_subset_seed=args.seed,
                        c4_sortwaste_validation_per_class=(
-                           args.c4_sortwaste_val_per_class if args.experiment == 'C4' else None
+                           args.c4_sortwaste_val_per_class if args.experiment in BALANCED else None
                        ),
                        training_sampling=c4_sampling or {'strategy': 'shuffle_without_replacement'})
     learning_rates = {'cnn': args.cnn_lr, 'resnet-head': args.head_lr,
