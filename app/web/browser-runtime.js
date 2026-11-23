@@ -2,6 +2,7 @@
 
 // Used only by the GitHub Pages build. Camera frames stay inside this browser.
 (() => {
+  const assetVersion = new URL(document.currentScript?.src || document.baseURI).searchParams.get("v");
   let worker;
   let loading;
   let metadata;
@@ -37,7 +38,9 @@
   }
 
   function createWorker() {
-    worker = new Worker(new URL("./model-worker.js", document.baseURI), { type: "module" });
+    const url = new URL("./model-worker.js", document.baseURI);
+    if (assetVersion) url.searchParams.set("v", assetVersion);
+    worker = new Worker(url, { type: "module" });
     worker.onmessage = ({ data }) => {
       if (data.type === "progress") {
         progress?.(data.message);
@@ -75,16 +78,20 @@
         const result = await request("load", {
           url: new URL(selected.model_url, document.baseURI).href,
           name: selected.name,
-          classes: selected.classes,
+          classes: selected.detector_classes || selected.classes,
           imageSize: selected.image_size,
+          classifierUrl: selected.classifier_url ? new URL(selected.classifier_url, document.baseURI).href : null,
+          classifierClasses: selected.classes,
+          classifierPreprocessing: selected.classifier_preprocessing,
           backend: new URLSearchParams(location.search).get("backend") || "auto",
         });
         metadata = {
-          ready: true, filename: selected.model_url.split("/").pop(), path: selected.model_url,
+          ready: true, filename: (selected.classifier_url || selected.model_url).split("/").pop(), path: selected.classifier_url || selected.model_url,
           name: selected.name, selected_model: selected.id, available_models: manifest.models,
+          description: selected.description || "",
           classes: selected.classes.map((name, id) => ({ id, name })),
           expected_classes: selected.classes, confidence: selected.confidence,
-          message: `${selected.name} runs on this device (${result.backend === "webgpu" ? "GPU" : "CPU"}). Camera images are not uploaded.`,
+          message: `${selected.name} runs on this device (${result.backend === "webgpu" ? "GPU" : result.backend === "wasm" ? "CPU" : "GPU + CPU"}). Camera images are not uploaded.`,
         };
         return metadata;
       })().then((result) => {

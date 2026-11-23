@@ -191,6 +191,79 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(client.post("/api/predict", content=image_bytes()).status_code, 503)
             self.assertTrue(client.post("/api/model/reload?model_id=taco").json()["ready"])
 
+    def hybrid_catalog(self):
+        self.model_catalog()
+        catalog_path = self.root / "models.json"
+        catalog = json.loads(catalog_path.read_text())
+        catalog["models"].append({
+            "id": "post", "name": "YOLO + post-trained ResNet", "type": "yolo_resnet",
+            "path": "models/post.pt", "detector_path": "models/best.pt",
+            "description": "YOLO boxes with post-trained material labels.",
+            "classes": ["cardboard", "plastic"],
+        })
+        catalog_path.write_text(json.dumps(catalog))
+
+    def test_hybrid_uses_resnet_labels_and_scores_with_the_original_yolo_boxes(self):
+        self.checkpoint()
+        self.checkpoint("models/post.pt")
+        self.hybrid_catalog()
+        calls = []
+
+        class Classifier:
+            classes = ["cardboard", "plastic"]
+
+            def predict(self, crops, device):
+                calls.append(([crop.size for crop in crops], device))
+                return [(0, .87), (1, .76)]
+
+        self.runtime.classifier_loader = lambda path: Classifier()
+        with TestClient(create_app(self.runtime)) as client:
+            switched = client.post("/api/model/reload?model_id=post").json()
+            self.assertTrue(switched["ready"])
+            self.assertEqual(switched["selected_model"], "post")
+            self.assertEqual(len(switched["available_models"]), 3)
+            predictions = client.post("/api/predict", content=image_bytes()).json()["detections"]
+            self.assertEqual(predictions[0]["class_name"], "cardboard")
+            self.assertEqual(predictions[0]["confidence"], .87)
+            self.assertEqual(predictions[0]["box"], [.1, .1, .9, .9])
+            self.assertEqual(predictions[1]["box"], [0, 0, 1, 1])
+            self.assertEqual(calls, [([(80, 40), (100, 50)], "cpu")])
+            self.assertTrue(client.post("/api/model/reload?model_id=taco").json()["ready"])
+            self.assertIsNone(self.runtime.classifier)
+            original = client.post("/api/predict", content=image_bytes()).json()["detections"]
+            self.assertEqual(original[0]["class_name"], "plastic")
+            self.assertEqual(original[0]["confidence"], .9)
+
+    def test_hybrid_requires_both_checkpoints(self):
+        self.checkpoint()
+        self.hybrid_catalog()
+        with TestClient(create_app(self.runtime)) as client:
+            choices = client.get("/api/model").json()["available_models"]
+            self.assertFalse(choices[2]["available"])
+            self.assertFalse(client.post("/api/model/reload?model_id=post").json()["ready"])
+        self.checkpoint("models/post.pt")
+        (self.root / "models/best.pt").unlink()
+        self.assertFalse(self.runtime.model_choices()[2]["available"])
+
+    def test_hybrid_confidence_slider_also_filters_uncertain_material_labels(self):
+        self.checkpoint()
+        self.checkpoint("models/post.pt")
+        self.hybrid_catalog()
+
+        class Classifier:
+            classes = ["cardboard", "plastic"]
+
+            def predict(self, crops, device):
+                return [(0, .2), (1, .8)]
+
+        self.runtime.classifier_loader = lambda path: Classifier()
+        with TestClient(create_app(self.runtime)) as client:
+            client.post("/api/model/reload?model_id=post")
+            predictions = client.post("/api/predict?confidence=0.6", content=image_bytes()).json()["detections"]
+            self.assertEqual(len(predictions), 1)
+            self.assertEqual(predictions[0]["class_name"], "plastic")
+            self.assertEqual(predictions[0]["confidence"], .8)
+
     def test_incompatible_checkpoint_is_not_marked_ready(self):
         self.checkpoint()
         self.detector.task = "classify"

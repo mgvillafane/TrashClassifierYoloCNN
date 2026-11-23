@@ -2,6 +2,15 @@
   "default_model": "sortwaste",
   "models": [
     {
+      "id": "sortwaste_yolo_resnet_post_training",
+      "name": "SortWaste · YOLO + ResNet · post-trained",
+      "type": "yolo_resnet",
+      "path": "models/sortwaste_yolo_resnet_post_training.pt",
+      "detector_path": "models/YOLO26m_SortWaste_7class_20261121.pt",
+      "description": "YOLO finds objects; the post-trained ResNet assigns six material labels. Cartons have no separate label.",
+      "classes": ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
+    },
+    {
       "id": "sortwaste",
       "name": "SortWaste · YOLO26 Medium · 7 classes",
       "path": "models/YOLO26m_SortWaste_7class_20261121.pt",

@@ -17,8 +17,13 @@ Open [SORT on GitHub Pages](https://mgvillafane.github.io/TrashClassifierYoloCNN
 in Chrome on Android, wait for the model to load, tap **Start camera**, and allow
 camera access.
 
-Use the **Detection model** dropdown above the results to switch between:
+Use the **Detection model** dropdown above the camera to switch between:
 
+- **SortWaste · YOLO + ResNet · post-trained**: `sortwaste_yolo_resnet_post_training.pt`,
+  the epoch-3 checkpoint selected after ten post-training epochs. The existing
+  SortWaste YOLO finds objects; ResNet assigns cardboard, glass, metal, paper,
+  plastic, or trash to each crop. It has no separate carton label. This option
+  adds a classification pass and can run more slowly on a phone.
 - **SortWaste · YOLO26 Medium · 7 classes** (default): `YOLO26m_SortWaste_7class_20261121.pt`,
   the best validation checkpoint from the November 21 SortWaste run. Training
   completed 16 epochs with early stopping. Classes: cardboard, glass, metal,
@@ -32,12 +37,13 @@ app and the GitHub Pages build. Model names, paths, and class orders are listed
 in `app/models.json`; provenance and SHA-256 hashes are in `app/models/*.source.json`.
 Weight binaries remain local, ignored files.
 
-The Pages build runs the selected model inside the phone's browser, using the
-exported ONNX model. It needs no Python server, tunnel, local Wi-Fi connection,
+The Pages build runs the selected pipeline inside the phone's browser, using
+exported ONNX models. It needs no Python server, tunnel, local Wi-Fi connection,
 or certificate installation. Camera frames are processed in a worker on the
 device and are not uploaded. The model and runtime files are public downloads.
-Each model's first download is about 78 MiB, plus the browser runtime. Only the
-selected model is downloaded and loaded; switching releases the previous worker. Performance
+Each YOLO model's first download is about 78 MiB; the hybrid option additionally
+downloads about 43 MiB for ResNet, plus the browser runtime. Only the selected
+pipeline is loaded; switching releases the previous worker. Performance
 depends on the phone; GPU acceleration is used when available, with a CPU fallback.
 
 To rebuild the static artifact:
@@ -50,8 +56,9 @@ npm install --prefix app/.runtime/pages-tools --ignore-scripts --save-exact onnx
 
 Publish only `app/.pages-dist/` to the Pages source branch, including the ONNX
 models, runtime files, and `.nojekyll`. All asset URLs are relative so the app
-works at a repository subpath. The export uses both registered checkpoints with
-320-pixel inputs for phone inference. The Python app below keeps 640-pixel inputs.
+works at a repository subpath. YOLO uses 320-pixel inputs in the browser and
+640-pixel inputs in Python. ResNet uses 224-pixel RGB crops with its saved
+ImageNet normalization in both modes.
 
 ### Python server
 
@@ -153,7 +160,7 @@ local recycling or disposal instructions.
 
 Use the **trained `best.pt`**, not the pretrained `yolo26m.pt` (COCO labels).
 The older local `demo-2` model uses 60 TACO categories. Model provenance, when
-downloaded for this app, is recorded in `app/models/source.json`; checkpoint
+downloaded for this app, is recorded in `app/models/*.source.json`; checkpoint
 binaries are ignored by Git.
 
 If the weights are absent or invalid, the app explains the problem and shows no
@@ -167,7 +174,10 @@ checkpoint is loaded.
 - **Analyze photo:** choose or capture a photo without a continuous camera stream.
 - **Confidence:** hide detections below the chosen threshold.
 - **Model:** inspect active labels and path, then reload a replacement checkpoint.
-- **Detection model:** select SortWaste or TACO; scanning stops during the switch.
+- **Detection model:** select either YOLO model or the post-trained YOLO + ResNet pipeline;
+  scanning stops during the switch.
+- **YOLO + ResNet:** the confidence setting filters both object detections and
+  the resulting material labels.
 
 Switching away from the page stops the camera. Tap Start camera to resume.
 The first prediction can take longer while PyTorch initializes. A photo with no
@@ -183,7 +193,8 @@ node --check app/web/app.js
 The API accepts a raw JPEG, PNG, or WebP image body at
 `POST /api/predict?confidence=0.35` and returns normalized boxes and inference
 timing. `GET /api/model` reports readiness and actual checkpoint labels;
-`POST /api/model/reload?model_id=sortwaste` (or `taco`) switches to a registered
+`POST /api/model/reload?model_id=sortwaste` (or `taco`, or
+`sortwaste_yolo_resnet_post_training`) switches to a registered
 checkpoint. Without `model_id`, it reloads the default in the local configuration.
 `GET /api/model` also lists the available models and active selection.
 Uploaded frames are limited to 5 MiB. The backend rejects invalid images and

@@ -116,7 +116,7 @@
     ui.classesTitle.textContent = model.ready ? "Model classes" : "Configured classes";
     ui.classCount.textContent = classes.length ? `${classes.length} classes` : "";
     ui.classNote.textContent = model.ready
-      ? "Labels read directly from your active checkpoint."
+      ? (model.description || "Labels read directly from your active checkpoint.")
       : "Available after your trained checkpoint is connected.";
     const modelPath = model.path || "models/best.pt";
     ui.modelPath.textContent = browserRuntime ? model.filename : /^(?:[A-Za-z]:|\/|app[\\/])/.test(modelPath) ? modelPath : `app/${modelPath}`;

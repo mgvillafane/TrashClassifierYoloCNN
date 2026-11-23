@@ -35,6 +35,12 @@
           <p class="intro-copy">Point your camera at an object.<br>Your model takes it from there.</p>
         </section>
 
+        <div class="model-picker">
+          <label for="model-select">Detection model</label>
+          <select id="model-select" aria-describedby="model-select-note" disabled><option value="">Loading models…</option></select>
+          <p id="model-select-note">Switching models stops the current scan.</p>
+        </div>
+
         <div class="workspace">
           <section class="scanner" aria-label="Camera and image scanner">
             <div class="viewfinder" id="viewfinder">
@@ -60,11 +66,6 @@
           </section>
 
           <section class="insights" aria-label="Detection results and model settings">
-            <div class="model-picker">
-              <label for="model-select">Detection model</label>
-              <select id="model-select" aria-describedby="model-select-note" disabled><option value="">Loading models…</option></select>
-              <p id="model-select-note">Switching models stops the current scan.</p>
-            </div>
             <div class="result-card">
               <div class="section-heading"><h2>In view</h2><span class="timing" id="timing">Awaiting a scan</span></div>
               <div class="primary-result"><div><p class="result-name" id="result-name">Nothing scanned yet</p><p class="result-description" id="result-description">A label will appear when your model sees an object.</p></div><span class="result-confidence" id="result-confidence">—</span></div>
