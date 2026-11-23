@@ -19,6 +19,7 @@
     modelSummary: $("model-summary"), modelMessage: $("model-message"),
     reload: $("reload-model"), confidence: $("confidence"),
     confidenceValue: $("confidence-value"),
+    modelSelect: $("model-select"),
   };
   const capture = document.createElement("canvas");
   const captureContext = capture.getContext("2d");
@@ -66,6 +67,7 @@
     ui.choosePhoto.disabled = state.opening || state.reloading;
     ui.reload.disabled = state.reloading;
     ui.reload.textContent = state.reloading ? "Loading model…" : "Reload model";
+    ui.modelSelect.disabled = state.reloading || ui.modelSelect.options.length < 2;
     ui.live.hidden = !running;
   }
 
@@ -79,6 +81,18 @@
     ui.timing.textContent = "Awaiting a scan";
     for (const chip of ui.classes.children) chip.classList.remove("detected");
     drawOverlay();
+  }
+
+  function renderChoices(choices, selected) {
+    if (!choices?.length) return;
+    ui.modelSelect.replaceChildren(...choices.map((item) => {
+      const option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = item.name + (item.available === false ? " (unavailable)" : "");
+      option.disabled = item.available === false;
+      return option;
+    }));
+    if (selected) ui.modelSelect.value = selected;
   }
 
   function renderModel(model) {
@@ -102,14 +116,15 @@
     ui.classesTitle.textContent = model.ready ? "Model classes" : "Configured classes";
     ui.classCount.textContent = classes.length ? `${classes.length} classes` : "";
     ui.classNote.textContent = model.ready
-      ? "Labels read directly from your active checkpoint."
+      ? (model.description || "Labels read directly from your active checkpoint.")
       : "Available after your trained checkpoint is connected.";
     const modelPath = model.path || "models/best.pt";
     ui.modelPath.textContent = browserRuntime ? model.filename : /^(?:[A-Za-z]:|\/|app[\\/])/.test(modelPath) ? modelPath : `app/${modelPath}`;
     ui.modelSummary.textContent = model.ready
-      ? `${model.filename || "best.pt"} · ${actualClasses.length} classes`
+      ? (model.name || `${model.filename || "best.pt"} · ${actualClasses.length} classes`)
       : "Checkpoint needed · tap to set up";
     ui.modelMessage.textContent = model.message || "";
+    renderChoices(model.available_models, model.selected_model);
     if (!model.ready) {
       ui.settings.open = true;
       status("Add your trained checkpoint to connect the model.", "warning");
@@ -133,7 +148,7 @@
     return data;
   }
 
-  async function loadModel(reload = false) {
+  async function loadModel(reload = false, modelId = null) {
     if (state.reloading) return;
     if (reload) stopScene();
     state.reloading = true;
@@ -142,19 +157,33 @@
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60000);
     try {
+      const selected = modelId || (reload ? ui.modelSelect.value : null);
       if (browserRuntime) {
+        const catalog = await browserRuntime.catalog();
+        renderChoices(catalog.models, selected || state.model?.selected_model || catalog.default_model);
         const model = await browserRuntime.load((message) => {
           status(message, "loading");
           ui.modelMessage.textContent = message;
-        });
+        }, selected || state.model?.selected_model, reload);
         renderModel(model);
         return;
       }
-      const response = await fetch(reload ? "/api/model/reload" : "/api/model", {
-        method: reload ? "POST" : "GET", cache: "no-store", signal: controller.signal,
-      });
+      const url = reload ? "/api/model/reload" + (selected ? `?model_id=${encodeURIComponent(selected)}` : "") : "/api/model";
+      let response;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        response = await fetch(url, {
+          method: reload ? "POST" : "GET", cache: "no-store", signal: controller.signal,
+        });
+        if (!reload || response.status !== 429) break;
+        status("Finishing the current scan before switching models…", "loading");
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
       renderModel(await readResponse(response));
     } catch (error) {
+      state.model = null;
+      ui.classes.replaceChildren();
+      ui.classCount.textContent = "";
+      ui.classNote.textContent = "Choose a model or reload to see its labels.";
       status(browserRuntime ? "Could not load the model. Check your connection and tap Reload model." : error.name === "AbortError" ? "Model loading timed out. Try reloading." : "Server unavailable. Keep the Python server running, then reload.", "error");
       ui.modelMessage.textContent = browserRuntime ? error.message : error.name === "AbortError" ? "The server took too long to respond." : "Could not reach the model server.";
       if (!state.model) {
@@ -484,6 +513,7 @@
     scanPhoto(file);
   });
   ui.reload.addEventListener("click", () => loadModel(true));
+  ui.modelSelect.addEventListener("change", () => loadModel(true, ui.modelSelect.value));
   ui.confidence.addEventListener("input", () => {
     state.confidence = Number(ui.confidence.value) / 100;
     state.hasConfidenceOverride = true;

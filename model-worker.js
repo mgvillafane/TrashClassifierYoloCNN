@@ -8,15 +8,18 @@ ort.env.logLevel = "error";
 let session;
 let classes;
 let size;
+let classifier;
+let classifierClasses;
+let classifierPreprocessing;
 const canvas = new OffscreenCanvas(1, 1);
 const context = canvas.getContext("2d", { willReadFrequently: true });
+const cropCanvas = new OffscreenCanvas(224, 224);
+const cropContext = cropCanvas.getContext("2d", { willReadFrequently: true });
 
 function progress(message) { self.postMessage({ type: "progress", message }); }
 
-async function loadModel(message) {
-  classes = message.classes;
-  size = message.imageSize;
-  const response = await fetch(message.url);
+async function downloadModel(url, name) {
+  const response = await fetch(url);
   if (!response.ok) throw new Error(`Model download failed (${response.status}).`);
   const total = Number(response.headers.get("content-length"));
   const reader = response.body.getReader();
@@ -30,7 +33,7 @@ async function loadModel(message) {
     length += value.length;
     const percent = total ? Math.floor(length / total * 100) : -1;
     if (percent !== lastPercent) {
-      progress(`Downloading YOLO_full_TACO${percent >= 0 ? ` · ${percent}%` : "…"}`);
+      progress(`Downloading ${name}${percent >= 0 ? ` Â· ${percent}%` : "â€¦"}`);
       lastPercent = percent;
     }
   }
@@ -38,15 +41,38 @@ async function loadModel(message) {
   let offset = 0;
   for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.length; }
   chunks.length = 0;
+  return buffer;
+}
+
+async function createSession(buffer, preferredBackend) {
   progress("Preparing your model on this device. First load can take a moment.");
-  let backend = "wasm";
-  if (message.backend !== "wasm" && navigator.gpu) {
+  if (preferredBackend !== "wasm" && navigator.gpu) {
     try {
-      session = await ort.InferenceSession.create(buffer, { executionProviders: ["webgpu", "wasm"], graphOptimizationLevel: "all" });
-      backend = "webgpu";
+      const loaded = await ort.InferenceSession.create(buffer, { executionProviders: ["webgpu", "wasm"], graphOptimizationLevel: "all" });
+      return { session: loaded, backend: "webgpu" };
     } catch { /* Fall back to the portable CPU runtime. */ }
   }
-  if (!session) session = await ort.InferenceSession.create(buffer, { executionProviders: ["wasm"], graphOptimizationLevel: "all" });
+  const loaded = await ort.InferenceSession.create(buffer, { executionProviders: ["wasm"], graphOptimizationLevel: "all" });
+  return { session: loaded, backend: "wasm" };
+}
+
+async function loadModel(message) {
+  if (session) await session.release();
+  if (classifier) await classifier.release();
+  session = classifier = null;
+  classes = message.classes;
+  size = message.imageSize;
+  const detector = await createSession(await downloadModel(message.url, message.name), message.backend);
+  session = detector.session;
+  let backend = detector.backend;
+  if (message.classifierUrl) {
+    classifierClasses = message.classifierClasses;
+    classifierPreprocessing = message.classifierPreprocessing;
+    if (classifierPreprocessing.image_size.some((value) => value !== 224)) throw new Error("Expected a 224-pixel ResNet model.");
+    const loaded = await createSession(await downloadModel(message.classifierUrl, "Post-trained ResNet"), backend);
+    classifier = loaded.session;
+    if (backend !== loaded.backend) backend = "mixed";
+  }
   return { backend };
 }
 
@@ -63,7 +89,7 @@ function decode(output, confidence, width, height, scale, padX, padY) {
   const raw = rows === classes.length + 4 || columns === classes.length + 4;
   const count = raw && rows === classes.length + 4 ? columns : rows;
   const at = (row, field) => raw && rows === classes.length + 4 ? data[field * count + row] : data[row * columns + field];
-  if (!raw && columns !== 6) throw new Error(`Unsupported model output shape: ${output.dims.join("×")}`);
+  if (!raw && columns !== 6) throw new Error(`Unsupported model output shape: ${output.dims.join("Ã—")}`);
   for (let row = 0; row < count; row++) {
     let score;
     let identifier;
@@ -102,36 +128,84 @@ function decode(output, confidence, width, height, scale, padX, padY) {
 async function predict({ blob, confidence }) {
   if (!session) throw new Error("The model has not finished loading.");
   const bitmap = await createImageBitmap(blob);
-  const width = bitmap.width;
-  const height = bitmap.height;
-  const started = performance.now();
-  const scale = Math.min(size / width, size / height);
-  const resizedWidth = Math.round(width * scale);
-  const resizedHeight = Math.round(height * scale);
-  const padX = Math.round((size - resizedWidth) / 2 - 0.1);
-  const padY = Math.round((size - resizedHeight) / 2 - 0.1);
-  canvas.width = canvas.height = size;
-  context.fillStyle = "rgb(114,114,114)";
-  context.fillRect(0, 0, size, size);
-  context.drawImage(bitmap, padX, padY, resizedWidth, resizedHeight);
-  bitmap.close();
-  const pixels = context.getImageData(0, 0, size, size).data;
-  const plane = size * size;
-  const input = new Float32Array(3 * plane);
-  for (let index = 0; index < plane; index++) {
-    input[index] = pixels[index * 4] / 255;
-    input[plane + index] = pixels[index * 4 + 1] / 255;
-    input[2 * plane + index] = pixels[index * 4 + 2] / 255;
-  }
-  const tensor = new ort.Tensor("float32", input, [1, 3, size, size]);
-  const outputs = await session.run({ [session.inputNames[0]]: tensor });
   try {
-    const detections = decode(outputs[session.outputNames[0]], confidence, width, height, scale, padX, padY);
-    return { detections, width, height, inference_ms: performance.now() - started };
+    const width = bitmap.width;
+    const height = bitmap.height;
+    const started = performance.now();
+    const scale = Math.min(size / width, size / height);
+    const resizedWidth = Math.round(width * scale);
+    const resizedHeight = Math.round(height * scale);
+    const padX = Math.round((size - resizedWidth) / 2 - 0.1);
+    const padY = Math.round((size - resizedHeight) / 2 - 0.1);
+    canvas.width = canvas.height = size;
+    context.fillStyle = "rgb(114,114,114)";
+    context.fillRect(0, 0, size, size);
+    context.drawImage(bitmap, padX, padY, resizedWidth, resizedHeight);
+    const pixels = context.getImageData(0, 0, size, size).data;
+    const plane = size * size;
+    const input = new Float32Array(3 * plane);
+    for (let index = 0; index < plane; index++) {
+      input[index] = pixels[index * 4] / 255;
+      input[plane + index] = pixels[index * 4 + 1] / 255;
+      input[2 * plane + index] = pixels[index * 4 + 2] / 255;
+    }
+    const tensor = new ort.Tensor("float32", input, [1, 3, size, size]);
+    let outputs;
+    try {
+      outputs = await session.run({ [session.inputNames[0]]: tensor });
+      let detections = decode(outputs[session.outputNames[0]], confidence, width, height, scale, padX, padY);
+      if (classifier) detections = await classifyDetections(bitmap, detections, confidence);
+      return { detections, width, height, inference_ms: performance.now() - started };
+    } finally {
+      tensor.dispose();
+      for (const value of Object.values(outputs || {})) value.dispose();
+    }
   } finally {
-    tensor.dispose();
-    for (const value of Object.values(outputs)) value.dispose();
+    bitmap.close();
   }
+}
+
+async function classifyDetections(bitmap, detections, confidence) {
+  const classified = [];
+  const plane = 224 * 224;
+  const { mean, std } = classifierPreprocessing;
+  const valid = detections.filter(({ box }) => box[2] > box[0] && box[3] > box[1]);
+  for (let start = 0; start < valid.length; start += 4) {
+    const batch = valid.slice(start, start + 4);
+    const input = new Float32Array(batch.length * 3 * plane);
+    batch.forEach((item, index) => {
+      const left = Math.max(0, Math.floor(item.box[0] * bitmap.width));
+      const top = Math.max(0, Math.floor(item.box[1] * bitmap.height));
+      const right = Math.min(bitmap.width, Math.max(left + 1, Math.ceil(item.box[2] * bitmap.width)));
+      const bottom = Math.min(bitmap.height, Math.max(top + 1, Math.ceil(item.box[3] * bitmap.height)));
+      cropContext.drawImage(bitmap, left, top, right - left, bottom - top, 0, 0, 224, 224);
+      const pixels = cropContext.getImageData(0, 0, 224, 224).data;
+      for (let pixel = 0; pixel < plane; pixel++) {
+        for (let channel = 0; channel < 3; channel++) {
+          input[index * 3 * plane + channel * plane + pixel] = (pixels[pixel * 4 + channel] / 255 - mean[channel]) / std[channel];
+        }
+      }
+    });
+    const tensor = new ort.Tensor("float32", input, [batch.length, 3, 224, 224]);
+    let outputs;
+    try {
+      outputs = await classifier.run({ [classifier.inputNames[0]]: tensor });
+      const logits = outputs[classifier.outputNames[0]].data;
+      batch.forEach((item, index) => {
+        const row = Array.from(logits.slice(index * classifierClasses.length, (index + 1) * classifierClasses.length));
+        const maximum = Math.max(...row);
+        const identifier = row.indexOf(maximum);
+        const score = 1 / row.reduce((total, value) => total + Math.exp(value - maximum), 0);
+        if (Number.isFinite(score) && score >= confidence) classified.push({
+          ...item, class_id: identifier, class_name: classifierClasses[identifier], confidence: score,
+        });
+      });
+    } finally {
+      tensor.dispose();
+      for (const value of Object.values(outputs || {})) value.dispose();
+    }
+  }
+  return classified.sort((a, b) => b.confidence - a.confidence);
 }
 
 self.onmessage = async ({ data }) => {

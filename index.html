@@ -10,9 +10,10 @@
     <title>SORT · Live trash detection</title>
     <link rel="icon" href="./icon.svg" type="image/svg+xml">
     <link rel="manifest" href="./manifest.webmanifest">
-    <link rel="stylesheet" href="./styles.css">
-    <script src="./browser-runtime.js" defer></script>
-    <script src="./app.js" defer></script>
+    <link rel="stylesheet" href="./styles.css?v=97f7a631ddb1">
+    <script src="./browser-runtime.js?v=97f7a631ddb1" defer></script>
+    <script src="./app.js?v=97f7a631ddb1" defer></script>
+    <meta name="sort-build" content="97f7a631ddb1">
   </head>
   <body>
     <svg class="svg-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -35,6 +36,12 @@
           <h1 id="page-title">See it. Know it.</h1>
           <p class="intro-copy">Point your camera at an object.<br>Your model takes it from there.</p>
         </section>
+
+        <div class="model-picker">
+          <label for="model-select">Detection model</label>
+          <select id="model-select" aria-describedby="model-select-note" disabled><option value="">Loading models…</option></select>
+          <p id="model-select-note">Switching models stops the current scan.</p>
+        </div>
 
         <div class="workspace">
           <section class="scanner" aria-label="Camera and image scanner">
@@ -70,11 +77,11 @@
             <div class="class-section"><div class="section-heading"><h2 id="classes-title">Model classes</h2><span class="class-count" id="class-count"></span></div><div class="class-chips" id="class-chips"></div><p class="class-note" id="class-note">Classes come directly from your checkpoint.</p></div>
 
             <details class="model-settings" id="model-settings">
-              <summary><span><span class="settings-title">Model &amp; settings</span><span class="settings-subtitle" id="model-summary">YOLO_full_TACO · on your device</span></span><svg><use href="#i-chevron"/></svg></summary>
+              <summary><span><span class="settings-title">Model &amp; settings</span><span class="settings-subtitle" id="model-summary">Choose a detection model</span></span><svg><use href="#i-chevron"/></svg></summary>
               <div class="settings-content">
-                <p class="field-label">YOUR MODEL</p>
-                <code class="model-path" id="model-path">YOLO_full_TACO</code>
-                <p class="settings-copy">The TACO-trained model runs on your phone. The first download is about 78 MB; speed depends on your device.</p>
+                <p class="field-label">ACTIVE MODEL</p>
+                <code class="model-path" id="model-path">Loading your selected model…</code>
+                <p class="settings-copy">Models run on your phone. The YOLO + ResNet option loads both models.</p>
                 <button class="reload-button" id="reload-model" type="button">Reload model</button>
                 <p class="model-message" id="model-message"></p>
                 <div class="confidence-heading"><label for="confidence">Minimum confidence</label><output id="confidence-value" for="confidence">35%</output></div>

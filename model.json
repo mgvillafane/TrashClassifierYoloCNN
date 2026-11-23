@@ -1,19 +1,101 @@
 {
-  "model_url": "./models/YOLO_full_TACO.onnx",
-  "classes": [
-    "cardboard",
-    "glass",
-    "metal",
-    "paper",
-    "plastic",
-    "trash"
+  "build_id": "97f7a631ddb1",
+  "default_model": "sortwaste",
+  "models": [
+    {
+      "id": "sortwaste_yolo_resnet_post_training",
+      "name": "SortWaste \u00b7 YOLO + ResNet \u00b7 post-trained",
+      "model_url": "./models/YOLO26m_SortWaste_7class_20261121.onnx",
+      "classes": [
+        "cardboard",
+        "glass",
+        "metal",
+        "paper",
+        "plastic",
+        "trash"
+      ],
+      "image_size": 320,
+      "confidence": 0.35,
+      "model_bytes": 81599066,
+      "model_sha256": "e94cd22db4190b3621d67f2779937f060311389f57e3092363210bd2832817e7",
+      "source_checkpoint": "YOLO26m_SortWaste_7class_20261121.pt",
+      "source_sha256": "ba6e96fc8bc0b6debc07110475a3a6e6ec79edf409e372791e48deca11973c20",
+      "type": "yolo_resnet",
+      "description": "YOLO finds objects; the post-trained ResNet assigns six material labels. Cartons have no separate label.",
+      "detector_classes": [
+        "cardboard",
+        "glass",
+        "metal",
+        "paper",
+        "plastic",
+        "trash",
+        "carton"
+      ],
+      "classifier_url": "./models/sortwaste_yolo_resnet_post_training.onnx",
+      "classifier_preprocessing": {
+        "color_mode": "RGB",
+        "image_size": [
+          224,
+          224
+        ],
+        "interpolation": "bilinear",
+        "pixel_scale": 255,
+        "mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "std": [
+          0.229,
+          0.224,
+          0.225
+        ]
+      },
+      "classifier_bytes": 44708867,
+      "classifier_sha256": "beaaa9fb3da6f738de3a6f0e7c84705b93c9131e1f08d45f758aeffc799b6f45",
+      "classifier_source_checkpoint": "sortwaste_yolo_resnet_post_training.pt",
+      "classifier_source_sha256": "bc81ad64aa202dfda0269733b7770e7d5b4bce3605d4432aac1e4d98ccd296f4"
+    },
+    {
+      "id": "sortwaste",
+      "name": "SortWaste \u00b7 YOLO26 Medium \u00b7 7 classes",
+      "model_url": "./models/YOLO26m_SortWaste_7class_20261121.onnx",
+      "classes": [
+        "cardboard",
+        "glass",
+        "metal",
+        "paper",
+        "plastic",
+        "trash",
+        "carton"
+      ],
+      "image_size": 320,
+      "confidence": 0.35,
+      "model_bytes": 81599066,
+      "model_sha256": "e94cd22db4190b3621d67f2779937f060311389f57e3092363210bd2832817e7",
+      "source_checkpoint": "YOLO26m_SortWaste_7class_20261121.pt",
+      "source_sha256": "ba6e96fc8bc0b6debc07110475a3a6e6ec79edf409e372791e48deca11973c20"
+    },
+    {
+      "id": "taco",
+      "name": "TACO \u00b7 YOLO26 Medium \u00b7 6 classes",
+      "model_url": "./models/YOLO_full_TACO.onnx",
+      "classes": [
+        "cardboard",
+        "glass",
+        "metal",
+        "paper",
+        "plastic",
+        "trash"
+      ],
+      "image_size": 320,
+      "confidence": 0.35,
+      "model_bytes": 81595991,
+      "model_sha256": "655cfa36df611ac9862e679444049dfaf2e2d7f9169e6eedaf21fc9aad365f06",
+      "source_checkpoint": "YOLO_full_TACO.pt",
+      "source_sha256": "c891c3fe5f2cb6af6d467b5115bb9e530a55d38cc9cc86e26af6069962a83559"
+    }
   ],
-  "image_size": 320,
-  "confidence": 0.35,
-  "model_bytes": 81595991,
-  "model_sha256": "234aa9066ce397e558f4a08395973c5ee79feb3afe75dc8c7ac4609d58097b8f",
-  "source_checkpoint": "YOLO_full_TACO.pt",
-  "source_sha256": "c891c3fe5f2cb6af6d467b5115bb9e530a55d38cc9cc86e26af6069962a83559",
   "runtime_version": "1.31.1",
   "processing": "browser-only"
 }
