@@ -69,7 +69,7 @@ async function loadModel(message) {
     classifierClasses = message.classifierClasses;
     classifierPreprocessing = message.classifierPreprocessing;
     if (classifierPreprocessing.image_size.some((value) => value !== 224)) throw new Error("Expected a 224-pixel ResNet model.");
-    const loaded = await createSession(await downloadModel(message.classifierUrl, "Post-trained ResNet"), backend);
+    const loaded = await createSession(await downloadModel(message.classifierUrl, "ResNet material classifier"), backend);
     classifier = loaded.session;
     if (backend !== loaded.backend) backend = "mixed";
   }
