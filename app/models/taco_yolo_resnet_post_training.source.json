@@ -1,0 +1,19 @@
+{
+  "filename": "taco_yolo_resnet_post_training.pt",
+  "sha256": "66cb1693ca3baead7bb190bd6232543e74df0e4764a773ade263d405c06eec81",
+  "architecture": "ResNet18, layer4 and head fine-tuned on fixed TACO YOLO crops",
+  "source": "/Volumes/workspace/default/models/taco_yolo_resnet_post_training/best.pt",
+  "epochs_completed": 10,
+  "selected_epoch": 9,
+  "checkpoint_selection": "TACO validation macro-F1",
+  "detector": "YOLO_full_TACO.pt",
+  "detector_sha256": "c891c3fe5f2cb6af6d467b5115bb9e530a55d38cc9cc86e26af6069962a83559",
+  "classes": [
+    "cardboard",
+    "glass",
+    "metal",
+    "paper",
+    "plastic",
+    "trash"
+  ]
+}

@@ -47,6 +47,7 @@ def build(export=False):
         assets[converted.name] = converted
         metadata = {
             "id": entry["id"], "name": entry["name"],
+            "description": entry.get("description", ""),
             "model_url": f"./models/{converted.name}", "classes": entry["classes"],
             "image_size": 320, "confidence": 0.35,
             "model_bytes": converted.stat().st_size, "model_sha256": digest(converted),

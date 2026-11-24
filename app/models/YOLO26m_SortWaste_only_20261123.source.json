@@ -1,0 +1,33 @@
+{
+  "filename": "YOLO26m_SortWaste_only_20261123.pt",
+  "sha256": "2dd3952f6afe9736fee94fac42e8d4917c27b2ea5f1b89dc5a8a7b2931770a41",
+  "architecture": "YOLO26 Medium",
+  "source": "/Volumes/workspace/default/models/yolo_experiments/yolo_sortwaste_20261123T105343Z/weights/best.pt",
+  "run_name": "yolo_sortwaste_20261123T105343Z",
+  "dataset": "SortWaste only; train/validation lists from run_info.json",
+  "initial_checkpoint": "/Volumes/workspace/default/tacotrashdata/yolo/weights/yolo26m.pt",
+  "initial_checkpoint_sha256": "401cea9ab23ad19246ff7744859816bc599f350e93c9dd30367b6f0a0745d0b7",
+  "initialization": "COCO-pretrained; no TACO training images",
+  "epochs_requested": 40,
+  "epochs_completed": 17,
+  "best_logged_epoch": 9,
+  "checkpoint_selection": "Ultralytics best.pt (validation fitness on the val lists above)",
+  "classes": {
+    "0": "cardboard",
+    "1": "glass",
+    "2": "metal",
+    "3": "paper",
+    "4": "plastic",
+    "5": "trash",
+    "6": "carton"
+  },
+  "evaluation_materials": [
+    "cardboard",
+    "metal",
+    "plastic"
+  ],
+  "train_images": 3705,
+  "val_images": 780,
+  "downloaded_at": "2026-11-24T00:07:48.224458+00:00",
+  "evaluation_source": "/Volumes/workspace/default/models/model_eval"
+}

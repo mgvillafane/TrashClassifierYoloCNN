@@ -19,6 +19,13 @@ camera access.
 
 Use the **Detection model** dropdown above the camera to switch between:
 
+- **SortWaste only · YOLO26 Medium · COCO-pretrained**:
+  `YOLO26m_SortWaste_only_20261123.pt`, trained directly from COCO-pretrained
+  weights on 3,705 SortWaste training images, with no TACO training images.
+  Completed 17 of a maximum 40 epochs before early stopping; epoch 9 has the
+  highest logged validation mAP50–95. The checkpoint defines seven labels, but
+  the supported evaluation materials are cardboard, metal, and plastic.
+  Its held-out TACO shared-material mAP50 is 4.61%, versus 43.43% on SortWaste test.
 - **SortWaste · YOLO + ResNet · post-trained**: `sortwaste_yolo_resnet_post_training.pt`,
   the epoch-3 checkpoint selected after ten post-training epochs. The existing
   SortWaste YOLO finds objects; ResNet assigns cardboard, glass, metal, paper,
@@ -30,6 +37,11 @@ Use the **Detection model** dropdown above the camera to switch between:
   paper, plastic, trash, and carton.
 - **TACO · YOLO26 Medium · 6 classes**: the preserved `YOLO_full_TACO.pt` checkpoint,
   with the same materials except carton.
+- **TACO · YOLO + ResNet · post-trained**: `taco_yolo_resnet_post_training.pt`,
+  paired with `YOLO_full_TACO.pt`. C4 ResNet completed 10 post-training epochs
+  on TACO training crops; epoch 9 was selected by validation macro F1.
+  YOLO stayed frozen during this adaptation. Both checkpoints run in the
+  Python app and the browser build, with six material labels.
 
 Switching stops the current scan and clears its results. Start the camera or
 choose a photo again to compare models. The dropdown works in both the Python
@@ -172,7 +184,9 @@ checkpoint is loaded.
 - **Start / Stop camera:** rear camera by default; stopping releases the camera.
 - **Flip camera:** switch between rear and front cameras.
 - **Analyze photo:** choose or capture a photo without a continuous camera stream.
-- **Confidence:** hide detections below the chosen threshold.
+- **Minimum confidence:** the slider below the model dropdown accepts 0–100%.
+  The setting persists on this browser, applies to subsequent live frames, and
+  automatically reanalyzes a selected photo when changed.
 - **Model:** inspect active labels and path, then reload a replacement checkpoint.
 - **Detection model:** select either YOLO model or the post-trained YOLO + ResNet pipeline;
   scanning stops during the switch.

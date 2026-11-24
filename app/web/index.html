@@ -41,6 +41,12 @@
           <p id="model-select-note">Switching models stops the current scan.</p>
         </div>
 
+        <div class="confidence-control">
+          <div class="confidence-heading"><label for="confidence">Minimum confidence</label><output id="confidence-value" for="confidence">35%</output></div>
+          <input type="range" id="confidence" min="0" max="100" step="1" value="35" aria-describedby="confidence-help">
+          <p id="confidence-help" class="confidence-copy">Adjust from 0% to 100%. Higher values show fewer detections. Photos update automatically.</p>
+        </div>
+
         <div class="workspace">
           <section class="scanner" aria-label="Camera and image scanner">
             <div class="viewfinder" id="viewfinder">
@@ -82,9 +88,6 @@
                 <p class="settings-copy">Choose a detection model above. Labels update automatically when you switch.</p>
                 <button class="reload-button" id="reload-model" type="button">Reload model</button>
                 <p class="model-message" id="model-message"></p>
-                <div class="confidence-heading"><label for="confidence">Minimum confidence</label><output id="confidence-value" for="confidence">35%</output></div>
-                <input type="range" id="confidence" min="0" max="100" step="1" value="35">
-                <p class="settings-copy confidence-copy">Higher values show fewer, more confident detections.</p>
               </div>
             </details>
           </section>
