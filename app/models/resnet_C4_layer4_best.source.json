@@ -1,0 +1,13 @@
+{
+  "filename": "resnet_C4_layer4_best.pt",
+  "sha256": "628c374dc53f5028ba21ed14387c9c54a89f271df4379c7c285c535a647a27f9",
+  "architecture": "ResNet18, C4 resnet-layer4 material classifier",
+  "source": "/Volumes/workspace/default/models/classifier_experiments/C4/20261120T034908Z_9bfaa9fb/resnet-layer4/best.pt",
+  "local_reference": "reports/sortwaste_yolo_resnet_test/archive/assets/resnet_C4_layer4_best.pt",
+  "selected_epoch": 14,
+  "checkpoint_selection": "dataset_average_macro_f1_then_dataset_average_accuracy",
+  "training_datasets": ["trashnet", "realwaste", "sortwaste"],
+  "dataset_specific_post_training": false,
+  "classes": ["cardboard", "glass", "metal", "paper", "plastic", "trash"],
+  "used_by": ["taco_yolo_resnet", "sortwaste_yolo_resnet"]
+}

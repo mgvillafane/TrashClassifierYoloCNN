@@ -1,4 +1,4 @@
-"""Load and export the app's post-trained material classifier."""
+"""Load and export the app's original and post-trained material classifiers."""
 
 from pathlib import Path
 

@@ -234,6 +234,49 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(original[0]["class_name"], "plastic")
             self.assertEqual(original[0]["confidence"], .9)
 
+    def test_hybrids_sharing_a_classifier_keep_their_selected_detector_and_identity(self):
+        self.checkpoint()
+        self.checkpoint("models/post.pt")
+        self.checkpoint("models/sortwaste.pt")
+        self.hybrid_catalog()
+        catalog_path = self.root / "models.json"
+        catalog = json.loads(catalog_path.read_text())
+        catalog["models"].append({
+            **catalog["models"][-1], "id": "sortwaste_hybrid", "name": "SortWaste hybrid",
+            "detector_path": "models/sortwaste.pt",
+        })
+        catalog_path.write_text(json.dumps(catalog))
+        alternate = Detector()
+        loaded_detectors = []
+
+        def load_detector(path):
+            loaded_detectors.append(path.name)
+            return alternate if path.name == "sortwaste.pt" else self.detector
+
+        class Classifier:
+            classes = ["cardboard", "plastic"]
+
+            def predict(self, crops, device):
+                return [(0, .9)] * len(crops)
+
+        self.runtime.loader = load_detector
+        self.runtime.classifier_loader = lambda path: Classifier()
+        with TestClient(create_app(self.runtime)) as client:
+            first = client.post("/api/model/reload?model_id=post").json()
+            self.assertEqual(first["selected_model"], "post")
+            switched = client.post("/api/model/reload?model_id=sortwaste_hybrid").json()
+            self.assertTrue(switched["ready"])
+            self.assertEqual(switched["selected_model"], "sortwaste_hybrid")
+            self.assertEqual(switched["name"], "SortWaste hybrid")
+            self.assertEqual(switched["filename"], first["filename"])
+            self.assertIs(self.runtime.model, alternate)
+            self.assertEqual(client.get("/api/model").json()["selected_model"], "sortwaste_hybrid")
+            self.assertEqual(client.post("/api/predict", content=image_bytes()).status_code, 200)
+            switched_back = client.post("/api/model/reload?model_id=post").json()
+            self.assertEqual(switched_back["selected_model"], "post")
+            self.assertIs(self.runtime.model, self.detector)
+        self.assertEqual(loaded_detectors[-3:], ["best.pt", "sortwaste.pt", "best.pt"])
+
     def test_hybrid_requires_both_checkpoints(self):
         self.checkpoint()
         self.hybrid_catalog()

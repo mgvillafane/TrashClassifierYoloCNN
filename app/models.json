@@ -2,30 +2,15 @@
   "default_model": "sortwaste",
   "models": [
     {
-      "id": "sortwaste_standalone",
-      "name": "SortWaste only · YOLO26 Medium · COCO-pretrained",
-      "path": "models/YOLO26m_SortWaste_only_20261123.pt",
-      "description": "Trained on SortWaste only from COCO weights. Evaluated materials: cardboard, metal and plastic; checkpoint defines seven labels.",
-      "classes": ["cardboard", "glass", "metal", "paper", "plastic", "trash", "carton"]
-    },
-    {
-      "id": "sortwaste_yolo_resnet_post_training",
-      "name": "SortWaste · YOLO + ResNet · post-trained",
-      "type": "yolo_resnet",
-      "path": "models/sortwaste_yolo_resnet_post_training.pt",
-      "detector_path": "models/YOLO26m_SortWaste_7class_20261121.pt",
-      "description": "YOLO finds objects; the post-trained ResNet assigns six material labels. Cartons have no separate label.",
+      "id": "taco",
+      "name": "TACO-YOLO",
+      "path": "models/YOLO_full_TACO.pt",
+      "description": "TACO YOLO26m detector with six material labels.",
       "classes": ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
     },
     {
-      "id": "sortwaste",
-      "name": "SortWaste · YOLO26 Medium · 7 classes",
-      "path": "models/YOLO26m_SortWaste_7class_20261121.pt",
-      "classes": ["cardboard", "glass", "metal", "paper", "plastic", "trash", "carton"]
-    },
-    {
       "id": "taco_yolo_resnet_post_training",
-      "name": "TACO · YOLO + ResNet · post-trained",
+      "name": "TACO-YOLO-ResNet post-trained",
       "type": "yolo_resnet",
       "path": "models/taco_yolo_resnet_post_training.pt",
       "detector_path": "models/YOLO_full_TACO.pt",
@@ -33,9 +18,37 @@
       "classes": ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
     },
     {
-      "id": "taco",
-      "name": "TACO · YOLO26 Medium · 6 classes",
-      "path": "models/YOLO_full_TACO.pt",
+      "id": "taco_yolo_resnet",
+      "name": "TACO-YOLO-ResNet (no post-training)",
+      "type": "yolo_resnet",
+      "path": "models/resnet_C4_layer4_best.pt",
+      "detector_path": "models/YOLO_full_TACO.pt",
+      "description": "TACO YOLO with the original C4 ResNet trained on TrashNet, RealWaste and SortWaste; no TACO post-training. Six material labels.",
+      "classes": ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
+    },
+    {
+      "id": "sortwaste",
+      "name": "SortWaste-YOLO",
+      "path": "models/YOLO26m_SortWaste_7class_20261121.pt",
+      "description": "YOLO26m fine-tuned on SortWaste from the TACO detector; seven material labels.",
+      "classes": ["cardboard", "glass", "metal", "paper", "plastic", "trash", "carton"]
+    },
+    {
+      "id": "sortwaste_yolo_resnet_post_training",
+      "name": "SortWaste-YOLO-ResNet post-trained",
+      "type": "yolo_resnet",
+      "path": "models/sortwaste_yolo_resnet_post_training.pt",
+      "detector_path": "models/YOLO26m_SortWaste_7class_20261121.pt",
+      "description": "SortWaste YOLO with C4 ResNet post-trained for 10 epochs on SortWaste training crops; epoch 3 selected on validation. Cartons have no separate label.",
+      "classes": ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
+    },
+    {
+      "id": "sortwaste_yolo_resnet",
+      "name": "SortWaste-YOLO-ResNet (no post-training)",
+      "type": "yolo_resnet",
+      "path": "models/resnet_C4_layer4_best.pt",
+      "detector_path": "models/YOLO26m_SortWaste_7class_20261121.pt",
+      "description": "SortWaste YOLO with the original C4 ResNet trained on TrashNet, RealWaste and SortWaste; no additional pipeline post-training. Cartons have no separate label.",
       "classes": ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
     }
   ]

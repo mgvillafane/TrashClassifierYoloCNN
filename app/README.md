@@ -19,29 +19,31 @@ camera access.
 
 Use the **Detection model** dropdown above the camera to switch between:
 
-- **SortWaste only · YOLO26 Medium · COCO-pretrained**:
-  `YOLO26m_SortWaste_only_20261123.pt`, trained directly from COCO-pretrained
-  weights on 3,705 SortWaste training images, with no TACO training images.
-  Completed 17 of a maximum 40 epochs before early stopping; epoch 9 has the
-  highest logged validation mAP50–95. The checkpoint defines seven labels, but
-  the supported evaluation materials are cardboard, metal, and plastic.
-  Its held-out TACO shared-material mAP50 is 4.61%, versus 43.43% on SortWaste test.
-- **SortWaste · YOLO + ResNet · post-trained**: `sortwaste_yolo_resnet_post_training.pt`,
-  the epoch-3 checkpoint selected after ten post-training epochs. The existing
-  SortWaste YOLO finds objects; ResNet assigns cardboard, glass, metal, paper,
-  plastic, or trash to each crop. It has no separate carton label. This option
-  adds a classification pass and can run more slowly on a phone.
-- **SortWaste · YOLO26 Medium · 7 classes** (default): `YOLO26m_SortWaste_7class_20261121.pt`,
-  the best validation checkpoint from the November 21 SortWaste run. Training
-  completed 16 epochs with early stopping. Classes: cardboard, glass, metal,
-  paper, plastic, trash, and carton.
-- **TACO · YOLO26 Medium · 6 classes**: the preserved `YOLO_full_TACO.pt` checkpoint,
-  with the same materials except carton.
-- **TACO · YOLO + ResNet · post-trained**: `taco_yolo_resnet_post_training.pt`,
-  paired with `YOLO_full_TACO.pt`. C4 ResNet completed 10 post-training epochs
-  on TACO training crops; epoch 9 was selected by validation macro F1.
-  YOLO stayed frozen during this adaptation. Both checkpoints run in the
-  Python app and the browser build, with six material labels.
+- **TACO-YOLO**: the preserved `YOLO_full_TACO.pt` detector, with six material labels.
+- **TACO-YOLO-ResNet post-trained**: the TACO detector paired with
+  `taco_yolo_resnet_post_training.pt`. C4 ResNet completed ten post-training
+  epochs on TACO training crops; epoch 9 was selected by validation macro F1.
+- **TACO-YOLO-ResNet (no post-training)**: the TACO detector paired with the
+  original `resnet_C4_layer4_best.pt` classifier, before TACO adaptation.
+- **SortWaste-YOLO** (default): `YOLO26m_SortWaste_7class_20261121.pt`, the best
+  validation checkpoint from the November 21 SortWaste run. It was initialized
+  from the TACO detector and completed 16 epochs with early stopping. Its seven
+  labels are cardboard, glass, metal, paper, plastic, trash, and carton.
+- **SortWaste-YOLO-ResNet post-trained**: the SortWaste detector paired with
+  `sortwaste_yolo_resnet_post_training.pt`. C4 ResNet completed ten post-training
+  epochs on SortWaste training crops; epoch 3 was selected on validation.
+- **SortWaste-YOLO-ResNet (no post-training)**: the SortWaste detector paired
+  with the original `resnet_C4_layer4_best.pt` classifier, before adaptation
+  on the detector's predicted crops.
+
+The original C4 classifier is the same epoch-14 checkpoint in both unadapted
+hybrids. It was trained on TrashNet, RealWaste, and SortWaste. “No post-training”
+means no additional adaptation of the pipeline; it is already a trained
+material classifier. Both adapted classifiers started from this exact C4
+checkpoint, with YOLO frozen during their ten post-training epochs.
+Within each dataset's trio, all three options use the same detector weights.
+Every ResNet option assigns six material labels and has no separate carton
+label. Hybrid inference adds a classification pass for each detected crop.
 
 Switching stops the current scan and clears its results. Start the camera or
 choose a photo again to compare models. The dropdown works in both the Python
@@ -188,7 +190,7 @@ checkpoint is loaded.
   The setting persists on this browser, applies to subsequent live frames, and
   automatically reanalyzes a selected photo when changed.
 - **Model:** inspect active labels and path, then reload a replacement checkpoint.
-- **Detection model:** select either YOLO model or the post-trained YOLO + ResNet pipeline;
+- **Detection model:** select one of the six YOLO or YOLO + ResNet pipelines;
   scanning stops during the switch.
 - **YOLO + ResNet:** the confidence setting filters both object detections and
   the resulting material labels.
@@ -207,9 +209,10 @@ node --check app/web/app.js
 The API accepts a raw JPEG, PNG, or WebP image body at
 `POST /api/predict?confidence=0.35` and returns normalized boxes and inference
 timing. `GET /api/model` reports readiness and actual checkpoint labels;
-`POST /api/model/reload?model_id=sortwaste` (or `taco`, or
-`sortwaste_yolo_resnet_post_training`) switches to a registered
-checkpoint. Without `model_id`, it reloads the default in the local configuration.
+`POST /api/model/reload?model_id=sortwaste` switches to a registered pipeline.
+The other IDs are `taco`, `taco_yolo_resnet_post_training`, `taco_yolo_resnet`,
+`sortwaste_yolo_resnet_post_training`, and `sortwaste_yolo_resnet`.
+Without `model_id`, it reloads the default in the local configuration.
 `GET /api/model` also lists the available models and active selection.
 Uploaded frames are limited to 5 MiB. The backend rejects invalid images and
 returns a busy response while another inference or reload is running.

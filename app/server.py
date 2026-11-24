@@ -81,12 +81,15 @@ class ModelRuntime:
         self.lock = Lock()
         self.model = None
         self.classifier = None
+        self.selected_model_id = None
         self.settings = Settings()
         self.status = self._status(False, "Model has not been loaded yet.")
 
     def _status(self, ready: bool, message: str, names: dict | None = None) -> dict:
         choices = self.model_choices()
-        selected = next((item for item in choices if item["path"] == self.settings.model_path), None)
+        selected = next((item for item in choices if item["id"] == self.selected_model_id), None)
+        if selected is None:
+            selected = next((item for item in choices if item["path"] == self.settings.model_path), None)
         return {
             "ready": ready,
             "filename": Path(self.settings.model_path).name,
@@ -130,6 +133,7 @@ class ModelRuntime:
                 self.settings = replace(self.settings, model_path=selected["path"])
             else:
                 selected = next((item for item in self.model_choices() if item["path"] == self.settings.model_path), None)
+            self.selected_model_id = selected["id"] if selected else None
             configured = Path(self.settings.model_path).expanduser()
             path = configured if configured.is_absolute() else self.config_path.parent / configured
             path = path.resolve()
