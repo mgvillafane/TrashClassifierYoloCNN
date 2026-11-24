@@ -10,10 +10,10 @@
     <title>SORT · Live trash detection</title>
     <link rel="icon" href="./icon.svg" type="image/svg+xml">
     <link rel="manifest" href="./manifest.webmanifest">
-    <link rel="stylesheet" href="./styles.css?v=97f7a631ddb1">
-    <script src="./browser-runtime.js?v=97f7a631ddb1" defer></script>
-    <script src="./app.js?v=97f7a631ddb1" defer></script>
-    <meta name="sort-build" content="97f7a631ddb1">
+    <link rel="stylesheet" href="./styles.css?v=d5b8734e0696">
+    <script src="./browser-runtime.js?v=d5b8734e0696" defer></script>
+    <script src="./app.js?v=d5b8734e0696" defer></script>
+    <meta name="sort-build" content="d5b8734e0696">
   </head>
   <body>
     <svg class="svg-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -41,6 +41,12 @@
           <label for="model-select">Detection model</label>
           <select id="model-select" aria-describedby="model-select-note" disabled><option value="">Loading models…</option></select>
           <p id="model-select-note">Switching models stops the current scan.</p>
+        </div>
+
+        <div class="confidence-control">
+          <div class="confidence-heading"><label for="confidence">Minimum confidence</label><output id="confidence-value" for="confidence">35%</output></div>
+          <input type="range" id="confidence" min="0" max="100" step="1" value="35" aria-describedby="confidence-help">
+          <p id="confidence-help" class="confidence-copy">Adjust from 0% to 100%. Higher values show fewer detections. Photos update automatically.</p>
         </div>
 
         <div class="workspace">
@@ -84,9 +90,6 @@
                 <p class="settings-copy">Models run on your phone. The YOLO + ResNet option loads both models.</p>
                 <button class="reload-button" id="reload-model" type="button">Reload model</button>
                 <p class="model-message" id="model-message"></p>
-                <div class="confidence-heading"><label for="confidence">Minimum confidence</label><output id="confidence-value" for="confidence">35%</output></div>
-                <input type="range" id="confidence" min="0" max="100" step="1" value="35">
-                <p class="settings-copy confidence-copy">Higher values show fewer, more confident detections.</p>
               </div>
             </details>
           </section>
