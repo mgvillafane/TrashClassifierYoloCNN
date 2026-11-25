@@ -1,4 +1,4 @@
-"""Ten-epoch adaptation of C4 ResNet on fixed YOLO-predicted training crops.
+"""Adapt C4 ResNet on fixed YOLO-predicted crops with validation early stopping.
 
 The official training split supplies optimization examples. Validation selects
 the checkpoint. Test image and label files are never opened. Outputs are best.pt,
@@ -11,6 +11,7 @@ import argparse
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import csv
+from dataclasses import dataclass
 import math
 from pathlib import Path
 import random
@@ -26,6 +27,43 @@ else:
 
 RUN_NAME = "sortwaste_yolo_resnet_post_training"
 DEFAULT_OUTPUT = "/Volumes/workspace/default/models/" + RUN_NAME
+
+
+@dataclass
+class EarlyStopping:
+    patience: int = 0
+    best: float = -float("inf")
+    stale_epochs: int = 0
+
+    def __post_init__(self):
+        if self.patience < 0:
+            raise ValueError("patience must be nonnegative (0 disables early stopping)")
+
+    def update(self, score):
+        if not math.isfinite(score):
+            raise ValueError("Validation macro-F1 must be finite")
+        if score > self.best:
+            self.best, self.stale_epochs = score, 0
+        else:
+            self.stale_epochs += 1
+        return self.patience > 0 and self.stale_epochs >= self.patience
+
+
+def verify_reference(root, args, splits):
+    """Fail before training if TACO membership differs from the original run."""
+    expected = getattr(args, "reference_manifest_sha256", None)
+    if expected:
+        if args.dataset != "taco" or base.sha256(root / "split_manifest.json") != expected:
+            raise ValueError("TACO split manifest differs from the original standalone YOLO split")
+        counts = {split: len(entries) for split, entries in splits.items()}
+        if counts != {"train": 1126, "val": 197, "test": 177}:
+            raise ValueError(f"Unexpected original TACO split sizes: {counts}")
+    yolo_hash = getattr(args, "reference_yolo_sha256", None)
+    if yolo_hash and base.sha256(args.yolo) != yolo_hash:
+        raise ValueError("YOLO checkpoint differs from the original TACO standalone model")
+    return {"reference_manifest_sha256": expected,
+            "reference_yolo_sha256": yolo_hash,
+            "original_taco_split_verified": bool(expected and yolo_hash)}
 
 
 def crop_targets(predicted_boxes, targets, eligible, source, threshold=.5):
@@ -171,8 +209,9 @@ def train(args):
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=False)
     base.write_json(output / "status.json", {"state": "preparing"})
-    if args.epochs != 10:
-        raise ValueError("This experiment runs exactly 10 post-training epochs")
+    if args.epochs < 1:
+        raise ValueError("epochs must be positive")
+    stopper = EarlyStopping(getattr(args, "patience", 0))
     if not torch.cuda.is_available():
         raise RuntimeError("This full post-training run requires its A10 GPU")
     device = "cuda:0"
@@ -183,6 +222,7 @@ def train(args):
     settings.update({"mlflow": False, "wandb": False, "tensorboard": False})
     root = Path(args.data_root)
     splits = base.read_splits(root, args.dataset)
+    reference = verify_reference(root, args, splits)
     eligibility = {split: (base.taco_eligibility(root, splits[split]) if args.dataset == "taco"
                            else base.classifier_eligibility(args.classifier_index, splits, partition=split))
                    for split in ("train", "val")}
@@ -232,7 +272,9 @@ def train(args):
             "source_resnet_epoch": classifier.epoch, "source_resnet": args.resnet,
             "source_resnet_sha256": source_resnet_hash, "source_yolo": args.yolo,
             "source_yolo_sha256": source_yolo_hash, "index_sha256": index_hash,
-            "training_datasets": [args.dataset], "epochs": 10, "batch_size": 64,
+            "training_datasets": [args.dataset], "epochs": args.epochs, "batch_size": 64,
+            "early_stopping_patience": stopper.patience, "early_stopping_metric": "validation macro-F1",
+            "early_stopping_min_delta": 0.0, "reference_verification": reference,
             "lr": 1e-4, "backbone_lr": 1e-5, "optimizer": "AdamW", "weight_decay": 1e-4, "warmup_epochs": 0,
             "trainable_modules": ["layer4", "fc"], "batchnorm_running_stats": "frozen",
             "sampling": "natural class frequencies; each matched training crop once per epoch",
@@ -252,7 +294,7 @@ def train(args):
                    "yolo_validation": yolo_validation, "epochs_completed": 0}
         base.write_json(output / "metrics.json", summary)
         print({"initial_validation_accuracy": initial["accuracy"], "initial_validation_macro_f1": initial["macro_f1"]}, flush=True)
-        for epoch in range(1, 11):
+        for epoch in range(1, args.epochs + 1):
             started = perf_counter()
             training_mode(model)
             loss_sum, correct, seen = 0.0, 0, 0
@@ -275,26 +317,31 @@ def train(args):
                 seconds=perf_counter() - started))
             rank = (metrics["macro_f1"], metrics["accuracy"])
             improved = rank > best
-            if improved or epoch == 10:
-                checkpoint = {"model_state_dict": {name: value.detach().cpu() for name, value in model.state_dict().items()},
-                              "config": config, "epoch": epoch, "val_metrics": metrics}
-                torch.save(checkpoint, local / "checkpoint.pt")
-                if improved:
-                    best, best_metrics, best_epoch = rank, metrics, epoch
-                    shutil.copyfile(local / "checkpoint.pt", output / "best.pt")
-                if epoch == 10:
-                    shutil.copyfile(local / "checkpoint.pt", output / "last.pt")
+            stopped_early = stopper.update(metrics["macro_f1"])
+            checkpoint = {"model_state_dict": {name: value.detach().cpu() for name, value in model.state_dict().items()},
+                          "config": config, "epoch": epoch, "val_metrics": metrics}
+            torch.save(checkpoint, local / "checkpoint.pt")
+            if improved:
+                best, best_metrics, best_epoch = rank, metrics, epoch
+                shutil.copyfile(local / "checkpoint.pt", output / "best.pt")
+            shutil.copyfile(local / "checkpoint.pt", output / "last.pt")
             summary.update(epochs_completed=epoch, best_epoch=best_epoch, best_validation=best_metrics,
-                           last_validation=metrics, best_checkpoint=str(output / "best.pt"))
+                           last_validation=metrics, best_checkpoint=str(output / "best.pt"),
+                           epochs_requested=args.epochs, stopped_early=stopped_early,
+                           stale_epochs=stopper.stale_epochs)
             base.write_json(output / "metrics.json", summary)
             with (output / "history.csv").open("w", newline="") as stream:
                 writer = csv.DictWriter(stream, fieldnames=list(history[0]))
                 writer.writeheader()
                 writer.writerows(history)
             base.write_json(output / "status.json", {"state": "training", "epochs_completed": epoch,
-                            "epochs_requested": 10, "best_epoch": best_epoch,
+                            "epochs_requested": args.epochs, "best_epoch": best_epoch,
+                            "patience": stopper.patience, "stale_epochs": stopper.stale_epochs,
                             "val_accuracy": metrics["accuracy"], "val_macro_f1": metrics["macro_f1"]})
             print(history[-1], flush=True)
+            if stopped_early:
+                print(f"Early stopping: no validation macro-F1 improvement for {stopper.patience} epochs", flush=True)
+                break
         # Verify the selected checkpoint loads through the same inference adapter.
         loaded = base.ResNetClassifier(output / "best.pt", device)
         checked = validate(loaded.model, loaders["val"], device)
@@ -303,9 +350,12 @@ def train(args):
         if base.sha256(args.yolo) != source_yolo_hash or base.sha256(args.resnet) != source_resnet_hash:
             raise RuntimeError("A source checkpoint changed during the run")
         summary.update(saved_checkpoint_verified=True, source_checkpoints_preserved=True,
-                       best_checkpoint_sha256=base.sha256(output / "best.pt"))
+                       best_checkpoint_sha256=base.sha256(output / "best.pt"),
+                       stop_reason="early_stopping" if stopped_early else "maximum_epochs")
         base.write_json(output / "metrics.json", summary)
-        base.write_json(output / "status.json", {"state": "success", "epochs_completed": 10,
+        base.write_json(output / "status.json", {"state": "success", "epochs_completed": len(history),
+                        "epochs_requested": args.epochs, "patience": stopper.patience,
+                        "stop_reason": summary["stop_reason"],
                         "best_epoch": best_epoch, "best_checkpoint": str(output / "best.pt")})
     return summary
 
@@ -318,7 +368,10 @@ def main(argv=None):
     parser.add_argument("--classifier-index", default=base.DEFAULT_INDEX)
     parser.add_argument("--yolo", default=base.DEFAULT_YOLO)
     parser.add_argument("--resnet", default=base.DEFAULT_RESNET)
-    parser.add_argument("--epochs", type=int, default=10, choices=[10])
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--patience", type=int, default=0)
+    parser.add_argument("--reference-manifest-sha256")
+    parser.add_argument("--reference-yolo-sha256")
     parser.add_argument("--run-name", default=RUN_NAME)
     return train(parser.parse_args(argv))
 

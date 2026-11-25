@@ -39,10 +39,10 @@ def plot_report(directory):
     training = summary.get("training")
     history = summary.get("training_history")
     if training:
-        if training["epochs_completed"] != 10 or not training["saved_checkpoint_verified"]:
-            raise ValueError("Expected a verified ten-epoch training run")
-        if [int(row["epoch"]) for row in history] != list(range(1, 11)):
-            raise ValueError("Expected all ten training epochs")
+        if not training["saved_checkpoint_verified"]:
+            raise ValueError("Expected a verified training run")
+        if [int(row["epoch"]) for row in history] != list(range(1, training["epochs_completed"] + 1)):
+            raise ValueError("Expected every completed training epoch")
         selected = max(history, key=lambda row: (float(row["val_macro_f1"]), float(row["val_accuracy"])))
         if int(selected["epoch"]) != training["best_epoch"]:
             raise ValueError("Checkpoint selection disagrees with validation history")
@@ -57,7 +57,7 @@ def plot_report(directory):
         fig.text(.5, .925, f"{summary['test_images']} held-out test images | {count:,} identical matched objects | {population}",
                  ha="center", fontsize=10, color="#555555")
         if training:
-            fig.text(.5, .891, f"Post-training: 10 epochs on training data; epoch {training['best_epoch']} selected on validation before test evaluation",
+            fig.text(.5, .891, f"Post-training: {training['epochs_completed']} epochs on training data; epoch {training['best_epoch']} selected on validation before test evaluation",
                      ha="center", fontsize=10, color="#555555")
         table_axis = fig.add_axes([.06, .735, .88, .12])
         table_axis.axis("off")
@@ -161,7 +161,7 @@ def plot_report(directory):
             best_epoch = training["best_epoch"]
             fig, axes = plt.subplots(1, 2, figsize=(11.7, 8.3))
             fig.subplots_adjust(top=.80, bottom=.43, left=.08, right=.96, wspace=.23)
-            fig.suptitle(f"{dataset} ten-epoch post-training: TRAIN and VALIDATION history", fontsize=16, y=.97)
+            fig.suptitle(f"{dataset} post-training: TRAIN and VALIDATION history", fontsize=16, y=.97)
             fig.text(.5, .925, "This page explains checkpoint selection. The final TEST comparison is on pages 1-2.", ha="center", fontsize=10, color="#555555")
             axes[0].plot(epochs, [float(row["train_loss"]) for row in history], label="Training loss", color=colors[0])
             axes[0].plot(epochs, [float(row["val_loss"]) for row in history], label="Validation loss", color=colors[1])
@@ -175,13 +175,17 @@ def plot_report(directory):
             for axis in axes:
                 axis.axvline(best_epoch, color="#777777", linestyle='--', alpha=.6)
                 axis.set_xlabel("Epoch")
-                axis.set_xticks(epochs)
+                axis.set_xticks(epochs if len(epochs) <= 15 else epochs[::max(1, len(epochs) // 10)])
                 axis.spines[["top", "right"]].set_visible(False)
                 axis.grid(alpha=.2)
                 axis.legend(fontsize=8)
             config = training["config"]
             train_crops = sum(config["crop_counts"]["train"]["matched_counts"].values())
-            fig.text(.07, .30, f"Completed all 10 epochs, using {train_crops:,} matched training crops per epoch. Best validation checkpoint: epoch {best_epoch}.\n"
+            requested = config["epochs"]
+            patience = config.get("early_stopping_patience", 0)
+            stop = f"Early stopping patience: {patience}." if patience else "Early stopping disabled."
+            fig.text(.07, .30, f"Completed {training['epochs_completed']} of {requested} maximum epochs, using {train_crops:,} matched training crops per epoch.\n"
+                     f"Best validation checkpoint: epoch {best_epoch}. {stop}\n"
                      f"Official split: {config['crop_counts']['train']['images']:,} training images; {config['crop_counts']['val']['images']:,} validation images.\n"
                      "The test set did not select the checkpoint, confidence threshold, or training hyperparameters.",
                      fontsize=10, linespacing=1.8, va="top")
@@ -192,6 +196,38 @@ def plot_report(directory):
             fig.text(.07, .05, "Selected model: " + training["best_checkpoint"], fontsize=8, color="#555555")
             pdf.savefig(fig)
             plt.close(fig)
+
+        detection_path = directory / "detection_metrics.json"
+        if detection_path.is_file():
+            detection = json.loads(detection_path.read_text())
+            fig = plt.figure(figsize=(11.7, 8.3))
+            fig.suptitle("TACO TEST: end-to-end detection and material classification", fontsize=17, y=.96)
+            fig.text(.5, .91, "All 177 original held-out photos; all six materials; misses and false positives count", ha="center", fontsize=11)
+            ax = fig.add_axes([.06, .59, .88, .22]); ax.axis('off')
+            cells = []
+            for system, name in zip(systems, names):
+                item = detection['systems'][system]
+                intervals = item['intervals_95']
+                cells.append([name, *[f"{item[key]:.2%} [{intervals[key][0]:.2%}, {intervals[key][1]:.2%}]"
+                                     for key in ['map50', 'macro_f1']]])
+            table = ax.table(cellText=cells, colLabels=['System', 'mAP50 [95% CI]', 'Macro-F1 [95% CI]'],
+                             cellLoc='center', loc='center', colWidths=[.30,.35,.35])
+            table.auto_set_font_size(False); table.set_fontsize(10); table.scale(1, 2)
+            paired = detection['paired_differences']['yolo_post_resnet minus yolo']
+            fig.text(.07, .51, 'TACO-adapted C4 minus YOLO alone (paired source-image bootstrap):', fontsize=12)
+            fig.text(.07, .46, '\n'.join(
+                f"{label}: {100*paired[key]['difference']:+.2f} percentage points; 95% CI "
+                f"[{100*paired[key]['interval_95'][0]:+.2f}, {100*paired[key]['interval_95'][1]:+.2f}]"
+                for key, label in [('map50', 'mAP50'), ('macro_f1', 'Macro-F1')]), fontsize=11, linespacing=1.8)
+            fig.text(.07, .31,
+                     'Protocol: correct material plus box IoU >= 0.50; six equally weighted materials.\n'
+                     'YOLO proposals: confidence >= 0.01, max 100/image, 640 px, agnostic NMS IoU 0.70.\n'
+                     'Hybrid confidence = YOLO confidence x ResNet maximum softmax probability.\n'
+                     'F1 uses a fixed confidence threshold of 0.25. AP uses confidence-ranked detections.\n'
+                     'Confidence intervals: 1,000 paired image-bootstrap repetitions, seed 42.\n'
+                     'These end-to-end scores differ from the matched-object classification scores on pages 1-2.',
+                     fontsize=10, linespacing=1.8, va='top', color='#555555')
+            pdf.savefig(fig); plt.close(fig)
     print(f"Report: {target}")
 
 

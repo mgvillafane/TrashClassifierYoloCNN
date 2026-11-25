@@ -487,9 +487,10 @@ def run_evaluation(args):
         summary["training"] = json.loads(training_path.read_text())
         with training_path.with_name("history.csv").open(newline="") as stream:
             summary["training_history"] = list(csv.DictReader(stream))
-        if (summary["training"]["epochs_completed"] != 10 or
+        if (not summary["training"].get("saved_checkpoint_verified") or
+                summary["training"]["epochs_completed"] != len(summary["training_history"]) or
                 summary["training"]["best_checkpoint_sha256"] != config.get("post_resnet_sha256")):
-            raise ValueError("Training metadata does not identify the evaluated ten-epoch checkpoint")
+            raise ValueError("Training metadata does not identify the evaluated checkpoint and history")
     steady = timings[1:]  # First image includes model warm-up in this one-pass run.
     summary["timing"] = {"scope": "single-image GPU inference, includes crop preparation; excludes I/O; first image excluded",
         **{key: {"median_ms": float(np.median([row[key] for row in steady])),

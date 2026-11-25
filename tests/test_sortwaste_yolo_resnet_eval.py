@@ -4,7 +4,7 @@ import json
 import unittest
 
 from evaluation.sortwaste import CLASSES, RESNET_CLASSES, classification_metrics, detector_classes, match_boxes, paired_bootstrap, read_splits, summarize, taco_eligibility
-from evaluation.post_training import crop_targets, trainable_parameters, training_mode
+from evaluation.post_training import EarlyStopping, crop_targets, trainable_parameters, training_mode, verify_reference
 
 
 class PairedEvaluationTests(unittest.TestCase):
@@ -82,6 +82,29 @@ class PairedEvaluationTests(unittest.TestCase):
 
 
 class PostTrainingTests(unittest.TestCase):
+    def test_early_stopping_counts_consecutive_non_improving_epochs_and_resets(self):
+        stopper = EarlyStopping(patience=2)
+        self.assertFalse(stopper.update(.4))
+        self.assertFalse(stopper.update(.4))
+        self.assertFalse(stopper.update(.5))
+        self.assertFalse(stopper.update(.49))
+        self.assertTrue(stopper.update(.48))
+        self.assertEqual(stopper.best, .5)
+        disabled = EarlyStopping(0)
+        for _ in range(50):
+            self.assertFalse(disabled.update(.1))
+        with self.assertRaises(ValueError):
+            EarlyStopping(-1)
+
+    def test_changed_original_manifest_is_rejected_before_any_images_are_opened(self):
+        from types import SimpleNamespace
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'split_manifest.json').write_text('{}')
+            args = SimpleNamespace(dataset='taco', reference_manifest_sha256='incorrect')
+            with self.assertRaisesRegex(ValueError, 'original standalone YOLO split'):
+                verify_reference(root, args, {})
+
     def test_training_targets_are_ground_truth_and_exclude_unmatched_boxes_and_cartons(self):
         targets = [dict(class_id=4, box=[0, 0, .4, .4]), dict(class_id=6, box=[.5, .5, 1, 1])]
         predictions = [[0, 0, .4, .4], [.5, .5, 1, 1], [.45, 0, .6, .2]]
@@ -150,6 +173,32 @@ class TacoDatasetTests(unittest.TestCase):
             (root / 'labels/train/0.txt').write_text('6 0.5 0.5 0.5 0.5\n')
             with self.assertRaisesRegex(ValueError, 'seventh class'):
                 taco_eligibility(root, [Path('images/train/0.jpg')])
+
+
+class DetectionMetricTests(unittest.TestCase):
+    def test_score_ranked_class_matching_counts_wrong_labels_and_duplicates(self):
+        from evaluation.taco_detection import class_matches
+        box = [0, 0, 1, 1]
+        targets = [dict(class_id=4, box=box)]
+        predictions = [dict(class_id=4, box=box, confidence=.9),
+                       dict(class_id=4, box=box, confidence=.8),
+                       dict(class_id=2, box=box, confidence=.95)]
+        support, matches = class_matches(predictions, targets, 4)
+        self.assertEqual(support, 1)
+        self.assertEqual(matches, [(.9, True), (.8, False)])
+        self.assertEqual(class_matches(predictions, targets, 2), (0, [(.95, False)]))
+
+    def test_detection_macro_f1_includes_misses_and_bootstrap_stays_paired(self):
+        from evaluation.taco_detection import summarize, SYSTEMS
+        box = [0, 0, 1, 1]
+        targets = [dict(class_id=i, box=box) for i in range(6)]
+        perfect = [dict(class_id=i, box=box, confidence=.9) for i in range(6)]
+        image = dict(image='one', targets=targets, yolo=[], yolo_resnet=perfect, yolo_post_resnet=perfect)
+        report = summarize([image], repetitions=5)
+        self.assertEqual(report['systems']['yolo']['macro_f1'], 0)
+        self.assertEqual(report['systems']['yolo_post_resnet']['macro_f1'], 1)
+        self.assertEqual(report['paired_differences']['yolo_post_resnet minus yolo']['macro_f1']['interval_95'], [1, 1])
+        self.assertGreater(report['systems']['yolo_post_resnet']['map50'], .99)
 
 
 if __name__ == '__main__':
